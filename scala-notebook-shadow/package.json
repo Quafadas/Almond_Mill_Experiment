@@ -1,0 +1,82 @@
+{
+  "name": "scala-notebook-shadow",
+  "displayName": "Scala Notebook Shadow (POC)",
+  "description": "Shows Metals compile diagnostics as squiggles in Scala Jupyter notebook cells via a hidden Mill shadow script.",
+  "version": "0.0.1",
+  "private": true,
+  "publisher": "almond-mill-experiment",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onNotebook:jupyter-notebook"
+  ],
+  "main": "./out/src/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "scalaNotebook.openShadow",
+        "title": "Scala Notebook: Open Shadow File"
+      },
+      {
+        "command": "scalaNotebook.regenerate",
+        "title": "Scala Notebook: Regenerate Shadow File"
+      }
+    ],
+    "configuration": {
+      "title": "Scala Notebook Shadow",
+      "properties": {
+        "scalaNotebook.scalaVersion": {
+          "type": "string",
+          "default": "3.7.2",
+          "description": "Scala version written into the shadow file's `//| scalaVersion` header. Must match the kernel you run, otherwise phantom errors."
+        },
+        "scalaNotebook.mvnDeps": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Mill coordinates written into the shadow file's `//| mvnDeps` header, e.g. com.lihaoyi::upickle:4.0.2. Merged with dependencies discovered from `import $ivy` lines."
+        },
+        "scalaNotebook.preamble": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Lines inserted after the header, before the first cell (e.g. Almond predef imports)."
+        },
+        "scalaNotebook.shadowDir": {
+          "type": "string",
+          "default": "notebook-shadow",
+          "description": "Directory, relative to the first workspace folder, where shadow .scala files are written."
+        },
+        "scalaNotebook.debounceMs": {
+          "type": "number",
+          "default": 400,
+          "description": "Milliseconds to debounce shadow file regeneration after a notebook edit."
+        },
+        "scalaNotebook.compileOnCreate": {
+          "type": "boolean",
+          "default": false,
+          "description": "Run `./mill <shadowPath>:compile` once when a shadow file is first created. Only needed if Metals/Mill require it before reporting diagnostics for a brand-new script (see README Phase 0 findings)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -p . --watch",
+    "pretest": "npm run compile",
+    "test": "node --test out/test/*.test.js"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.4.0"
+  }
+}

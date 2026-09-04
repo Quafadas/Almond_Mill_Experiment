@@ -1,0 +1,7 @@
+# Deliberately near-empty. Its only job is to make Metals detect this workspace
+# as Mill-backed and pick Mill as the build server (see README §Phase 0).
+#
+# No root module is declared here: the shadow files under notebook-shadow/
+# are compiled individually as Mill scripts (`//| scalaVersion: ...` header,
+# invoked as `./mill notebook-shadow/<name>.scala:compile`), which needs
+# Mill >= 1.1.0's single-file script support rather than a root ScalaModule.
