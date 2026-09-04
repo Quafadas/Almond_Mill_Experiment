@@ -5,6 +5,65 @@ compile diagnostics as squiggles inside the cells of a `.ipynb` notebook in VS C
 modifying Metals or Mill, by concatenating a notebook's Scala cells into a hidden Mill "shadow"
 script and remapping the diagnostics VS Code reports for that file back onto the cell URIs.
 
+## Try it yourself
+
+These steps assume Windows + WSL2, with VS Code on Windows and the **WSL** extension installed, and
+Node 20+ available inside WSL. Everything below runs inside WSL — do this from a folder on the
+Linux filesystem (e.g. `~/...`), not under `/mnt/c`.
+
+1. **Clone and build the extension.**
+   ```bash
+   git clone https://github.com/Quafadas/Almond_Mill_Experiment.git
+   cd Almond_Mill_Experiment/scala-notebook-shadow
+   npm install
+   npm run compile
+   npm test        # optional: confirms the 16 unit tests pass, no VS Code needed for this step
+   ```
+
+2. **Open the extension project in VS Code, connected to WSL.**
+   ```bash
+   code .
+   ```
+   (or `code --remote wsl+<distro> .` from Windows). Confirm the bottom-left corner shows a
+   `WSL: <distro>` indicator.
+
+3. **Launch the Extension Development Host.** With `scala-notebook-shadow/` open as the workspace,
+   press `F5` (or Run ▸ Start Debugging). A second VS Code window opens with the extension loaded —
+   do all remaining steps in *that* window.
+
+4. **Open the fixture workspace** in the Extension Development Host: File ▸ Open Folder ▸ pick this
+   repo's `fixture/` directory.
+
+5. **Install Metals** in that window if it isn't already there (Extensions ▸ search
+   `scalameta.metals` ▸ Install). It should auto-detect `build.mill.yaml` and offer to use Mill as
+   the build server.
+
+6. **Import the build.** Open Command Palette (`Ctrl+Shift+P`) ▸ **Metals: Import Build**, and wait
+   for it to finish (watch the Metals item in the status bar). This step is required — see the
+   Phase 0 findings below for why.
+
+7. **Open `fixture/sample.ipynb`.** If VS Code prompts for a kernel, you can dismiss it — no kernel
+   needs to be installed or selected for diagnostics to work.
+
+8. **Inspect the shadow file.** Command Palette ▸ **Scala Notebook: Open Shadow File** to see the
+   generated `notebook-shadow/sample.scala`, or just look at it directly in the file explorer.
+
+9. **Exercise the acceptance checklist** (see below): edit cell 2 to introduce/fix a type error,
+   watch the squiggle move with it; add a markdown cell and confirm nothing shifts incorrectly;
+   close and reopen the notebook and confirm squiggles come back without duplicating the shadow
+   file.
+
+If squiggles don't show up after adding a dependency via `import $ivy` or after any other edit to
+the shadow file's `//|` header, re-run **Metals: Import Build** — and if that alone doesn't clear
+it, a full clean of the module was needed during Phase 0 testing too (see findings below). This is
+a known Metals/Mill limitation, not a bug in the extension.
+
+**Trying it against your own notebook instead of the fixture:** open any workspace that has a
+`build.mill` or `build.mill.yaml` at its root, add/open a `.ipynb` file with Scala code cells in it,
+and the extension activates automatically (`onNotebook:jupyter-notebook`) — no fixture-specific
+wiring involved. Adjust `scalaNotebook.*` settings (see below) to match your project's Scala
+version and dependencies.
+
 This repo has two parts:
 
 - [`scala-notebook-shadow/`](scala-notebook-shadow/) — the VS Code extension.
