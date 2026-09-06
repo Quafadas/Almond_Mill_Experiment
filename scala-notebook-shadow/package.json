@@ -2,7 +2,7 @@
   "name": "scala-notebook-shadow",
   "displayName": "Scala Notebook Shadow (POC)",
   "description": "Shows Metals compile diagnostics as squiggles in Scala Jupyter notebook cells via a hidden Mill shadow script.",
-  "version": "0.0.1",
+  "version": "0.0.3",
   "private": true,
   "publisher": "almond-mill-experiment",
   "engines": {
