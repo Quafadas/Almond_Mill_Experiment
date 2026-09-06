@@ -24,11 +24,42 @@
       {
         "command": "scalaNotebook.regenerate",
         "title": "Scala Notebook: Regenerate Shadow File"
+      },
+      {
+        "command": "scalaNotebook.showLog",
+        "title": "Scala Notebook: Show Log"
       }
     ],
     "configuration": {
       "title": "Scala Notebook Shadow",
       "properties": {
+        "scalaNotebook.logLevel": {
+          "type": "string",
+          "enum": [
+            "off",
+            "error",
+            "warn",
+            "info",
+            "debug",
+            "trace"
+          ],
+          "enumDescriptions": [
+            "Log nothing.",
+            "Only failures.",
+            "Failures and recoverable problems.",
+            "Lifecycle events: shadow files created, compiles started and finished.",
+            "Adds per-request detail: which file answered a language request and how many results survived mapping into cells. Start here when a feature returns nothing.",
+            "Adds high-frequency detail, notably completion result counts."
+          ],
+          "default": "info",
+          "description": "Verbosity of the Scala Notebook Shadow output channel. Takes effect immediately; no reload needed. Run \"Scala Notebook: Show Log\" to open the channel."
+        },
+        "scalaNotebook.completionResolveCount": {
+          "type": "number",
+          "default": 30,
+          "minimum": 0,
+          "description": "How many completion items to have Metals resolve (documentation, detail and auto-import edits) before they are shown. Relayed completions are never resolved on demand, so an unresolved item shows an empty documentation pane. Each resolve is a round trip to Metals; 0 disables resolution."
+        },
         "scalaNotebook.scalaVersion": {
           "type": "string",
           "default": "3.7.2",
@@ -41,6 +72,16 @@
           },
           "default": [],
           "description": "Mill coordinates written into the shadow file's `//| mvnDeps` header, e.g. com.lihaoyi::upickle:4.0.2. Merged with dependencies discovered from `import $ivy` lines."
+        },
+        "scalaNotebook.almondVersion": {
+          "type": "string",
+          "default": "0.14.5",
+          "description": "Almond version whose predef the shadow file reproduces: adds `sh.almond::jupyter-api:<version>` to `//| mvnDeps`, JitPack to `//| repositories`, and Almond's predef imports (Markdown, Html, publish, ...) before the first cell. Set to an empty string to leave the prelude out."
+        },
+        "scalaNotebook.ammoniteVersion": {
+          "type": "string",
+          "default": "3.0.8",
+          "description": "Ammonite version behind the kernel, whose `repl` and `interp` bridges the shadow file puts in scope: adds `com.lihaoyi:ammonite-repl-api_3.3.7:<version>` to `//| mvnDeps` and the bridge imports before the first cell. Should match the Ammonite your Almond version embeds. Set to an empty string to leave them out."
         },
         "scalaNotebook.preamble": {
           "type": "array",
@@ -64,6 +105,11 @@
           "type": "boolean",
           "default": false,
           "description": "Run `./mill <shadowPath>:compile` once when a shadow file is first created. Only needed if Metals/Mill require it before reporting diagnostics for a brand-new script (see README Phase 0 findings)."
+        },
+        "scalaNotebook.compileOnSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Ask Metals to cascade-compile the workspace after a regenerated shadow file is saved, so diagnostics refresh without reimporting the build."
         }
       }
     }
@@ -72,11 +118,17 @@
     "compile": "tsc -p .",
     "watch": "tsc -p . --watch",
     "pretest": "npm run compile",
-    "test": "node --test out/test/*.test.js"
+    "test": "node --test out/test/*.test.js",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "typecheck": "tsc -p . --noEmit"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.5",
     "@types/node": "^20.0.0",
     "@types/vscode": "^1.85.0",
-    "typescript": "^5.4.0"
+    "eslint": "^9.39.5",
+    "typescript": "^5.4.0",
+    "typescript-eslint": "^8.69.0"
   }
 }

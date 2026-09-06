@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
-import { groupByCellUri, PlainDiagnostic, translateDiagnostic, TranslatedDiagnostic } from "./mapping";
-import { ShadowManager } from "./shadowManager";
+import { groupByCellUri, PlainDiagnostic, rebaseDiagnostic, translateDiagnostic, TranslatedDiagnostic } from "./mapping";
+import { Logger } from "./log";
+import { ShadowManager, ShadowState } from "./shadowManager";
 
 function toPlain(diagnostic: vscode.Diagnostic): PlainDiagnostic {
   return {
@@ -11,8 +12,8 @@ function toPlain(diagnostic: vscode.Diagnostic): PlainDiagnostic {
     message: diagnostic.message,
     severity: diagnostic.severity,
     source: diagnostic.source,
-    code: diagnostic.code as PlainDiagnostic["code"],
-    tags: diagnostic.tags as number[] | undefined,
+    code: diagnostic.code,
+    tags: diagnostic.tags,
     relatedInformation: diagnostic.relatedInformation?.map((info) => ({
       uri: info.location.uri,
       range: {
@@ -56,29 +57,46 @@ function toVscodeDiagnostic(plain: PlainDiagnostic): vscode.Diagnostic {
  * notebook cells it was generated from, with line/column ranges remapped.
  */
 export class DiagnosticRelay {
-  constructor(private readonly collection: vscode.DiagnosticCollection, private readonly shadowManager: ShadowManager) {}
+  constructor(
+    private readonly collection: vscode.DiagnosticCollection,
+    private readonly shadowManager: ShadowManager,
+    private readonly log: Logger
+  ) {}
 
   /** Handler for vscode.languages.onDidChangeDiagnostics. */
   onDidChangeDiagnostics(e: vscode.DiagnosticChangeEvent): void {
     for (const uri of e.uris) {
-      if (this.shadowManager.isShadowUri(uri)) {
-        this.relay(uri);
+      if (this.shadowManager.mightBeShadowSource(uri)) {
+        void this.relay(uri);
       }
     }
   }
 
-  private relay(shadowUri: vscode.Uri): void {
-    const state = this.shadowManager.getStateForShadowUri(shadowUri);
-    if (!state) {
+  private async relay(uri: vscode.Uri): Promise<void> {
+    const resolved = await this.shadowManager.resolveShadowSource(uri);
+    if (!resolved) {
       return;
     }
+    this.publish(resolved.state);
+  }
 
-    const shadowDiagnostics = vscode.languages.getDiagnostics(shadowUri);
+  /**
+   * Recompute a notebook's cell diagnostics from *every* file they can arrive on - the
+   * shadow file and each Mill `.dest/` copy of it. Recomputing the union rather than
+   * handling one URI keeps an empty event on one source from wiping the other's findings.
+   */
+  private publish(state: ShadowState): void {
     const translated: TranslatedDiagnostic[] = [];
-    for (const diagnostic of shadowDiagnostics) {
-      const result = translateDiagnostic(state.mapping, shadowUri, toPlain(diagnostic));
-      if (result) {
-        translated.push(result);
+    for (const source of this.shadowManager.diagnosticSourcesFor(state)) {
+      for (const diagnostic of vscode.languages.getDiagnostics(source.uri)) {
+        const plain =
+          source.lineOffset === 0
+            ? toPlain(diagnostic)
+            : rebaseDiagnostic(toPlain(diagnostic), source.uri, state.shadowUri, source.lineOffset);
+        const result = translateDiagnostic(state.mapping, state.shadowUri, plain);
+        if (result) {
+          translated.push(result);
+        }
       }
     }
 
@@ -92,5 +110,15 @@ export class DiagnosticRelay {
       const plainDiagnostics = grouped.get(cell.document.uri.toString()) ?? [];
       this.collection.set(cell.document.uri, plainDiagnostics.map(toVscodeDiagnostic));
     }
+
+    this.log.debug(
+      () =>
+        `${state.relativePath}: ${translated.length} diagnostic(s) across ${grouped.size} cell(s)` +
+        ` from ${this.shadowManager.diagnosticSourcesFor(state).length} source file(s)`
+    );
+
+    // Diagnostics landing is the clearest signal that Metals has re-analyzed the shadow,
+    // and so that its inlay hints for these cells are worth asking for again.
+    this.shadowManager.notifyAnalysisChanged(state);
   }
 }
