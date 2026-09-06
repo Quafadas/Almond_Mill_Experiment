@@ -1,28 +1,29 @@
 import * as vscode from "vscode";
+import { CONFIG_DEFAULTS } from "./configDefaults";
 import { LanguageFeatureRelay } from "./languageFeatures";
 import { isLogLevel, LogLevel, Logger } from "./log";
 import { DiagnosticRelay } from "./relay";
 import { ExtensionConfig, ShadowManager } from "./shadowManager";
 
 function readLogLevel(cfg: vscode.WorkspaceConfiguration): LogLevel {
-  const value = cfg.get<string>("logLevel", "info");
-  return isLogLevel(value) ? value : "info";
+  const value = cfg.get<string>("logLevel", CONFIG_DEFAULTS.logLevel);
+  return isLogLevel(value) ? value : CONFIG_DEFAULTS.logLevel;
 }
 
 function readConfig(): ExtensionConfig {
   const cfg = vscode.workspace.getConfiguration("scalaNotebook");
   return {
     logLevel: readLogLevel(cfg),
-    completionResolveCount: cfg.get<number>("completionResolveCount", 30),
-    scalaVersion: cfg.get<string>("scalaVersion", "3.7.2"),
-    mvnDeps: cfg.get<string[]>("mvnDeps", []),
-    preamble: cfg.get<string[]>("preamble", []),
-    almondVersion: cfg.get<string>("almondVersion", "0.14.5"),
-    ammoniteVersion: cfg.get<string>("ammoniteVersion", "3.0.8"),
-    shadowDir: cfg.get<string>("shadowDir", "notebook-shadow"),
-    debounceMs: cfg.get<number>("debounceMs", 400),
-    compileOnCreate: cfg.get<boolean>("compileOnCreate", false),
-    compileOnSave: cfg.get<boolean>("compileOnSave", true),
+    completionResolveCount: cfg.get<number>("completionResolveCount", CONFIG_DEFAULTS.completionResolveCount),
+    scalaVersion: cfg.get<string>("scalaVersion", CONFIG_DEFAULTS.scalaVersion),
+    mvnDeps: cfg.get<string[]>("mvnDeps", CONFIG_DEFAULTS.mvnDeps),
+    preamble: cfg.get<string[]>("preamble", CONFIG_DEFAULTS.preamble),
+    almondVersion: cfg.get<string>("almondVersion", CONFIG_DEFAULTS.almondVersion ?? ""),
+    ammoniteVersion: cfg.get<string>("ammoniteVersion", CONFIG_DEFAULTS.ammoniteVersion ?? ""),
+    shadowDir: cfg.get<string>("shadowDir", CONFIG_DEFAULTS.shadowDir),
+    debounceMs: cfg.get<number>("debounceMs", CONFIG_DEFAULTS.debounceMs),
+    compileOnCreate: cfg.get<boolean>("compileOnCreate", CONFIG_DEFAULTS.compileOnCreate),
+    compileOnSave: cfg.get<boolean>("compileOnSave", CONFIG_DEFAULTS.compileOnSave),
   };
 }
 

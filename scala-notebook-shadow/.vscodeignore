@@ -1,7 +1,12 @@
 .vscode/**
 src/**
 test/**
+out/test/**
 tsconfig.json
+eslint.config.mjs
+.gitignore
+TODO.md
+CLAUDE.md
 **/*.map
 **/*.ts
 node_modules/**
