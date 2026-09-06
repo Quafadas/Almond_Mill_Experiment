@@ -83,7 +83,7 @@ jobs:
       - name: vsce package
         run: npx --yes @vscode/vsce@^3 package --no-dependencies --out scala-notebook-shadow.vsix
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: scala-notebook-shadow-vsix
           path: scala-notebook-shadow/scala-notebook-shadow.vsix
