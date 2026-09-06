@@ -129,9 +129,14 @@ Useful commands (Command Palette):
   `typescript-eslint`) and `tsc --noEmit`.
 - **Test** — `npm test` on Node 22 and 24, on Linux and macOS. `pretest` compiles, so a green test
   job also proves the build.
-- **Package VSIX** — `vsce package` after lint and test pass, uploading
-  `scala-notebook-shadow.vsix` as a build artifact. Nothing is published to the Marketplace; the
-  artifact is there to install by hand (`code --install-extension scala-notebook-shadow.vsix`).
+- **Package VSIX** — `vsce package` after lint and test pass, uploading the `.vsix` as a build
+  artifact. Nothing is published to the Marketplace; the artifact is there to install by hand
+  (`code --install-extension scala-notebook-shadow-<version>.vsix`).
+
+Pushing a `v*` tag runs the same three jobs and then a **Release** job, which attaches the `.vsix`
+to a GitHub Release (marked pre-release) with generated notes. The tag must match `version` in
+`package.json` or the packaging step fails, and — because GitHub reads workflow files from the ref
+being built — the tagged commit must itself contain `.github/workflows/ci.yml`.
 
 Nothing in CI runs Metals or Mill: the fixture build needs a JDK, a Metals import and generated
 shadow scripts, so everything it would cover stays on the manual-verification checklist below.
@@ -313,7 +318,7 @@ fixture/
   notebook-shadow/          # generated shadow scripts (not checked in)
   sample.ipynb                # notebook used for the acceptance checklist (issue §8)
 .github/
-  workflows/ci.yml         # lint + typecheck, tests on Node 22/24 (Linux, macOS), VSIX artifact
+  workflows/ci.yml         # lint + typecheck, tests on Node 22/24 (Linux, macOS), VSIX, release on v* tags
   dependabot.yml            # weekly npm and GitHub Actions updates
 ```
 
