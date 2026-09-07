@@ -82,16 +82,9 @@ jobs:
 
       - run: npm run compile
 
-      # On a tag build, refuse to package a VSIX whose version disagrees with the tag.
-      - name: Tag matches package.json version
+      - name: Set version from tag
         if: startsWith(github.ref, 'refs/tags/v')
-        run: |
-          tag="${GITHUB_REF_NAME#v}"
-          pkg="$(node -p "require('./package.json').version")"
-          if [ "$tag" != "$pkg" ]; then
-            echo "::error::tag $GITHUB_REF_NAME does not match package.json version $pkg"
-            exit 1
-          fi
+        run: npm version --no-git-tag-version --allow-same-version "${GITHUB_REF_NAME#v}"
 
       # --no-dependencies: nothing ships at runtime, the extension is plain compiled JS.
       # vsce names the file <name>-<version>.vsix.
