@@ -124,11 +124,11 @@
     "typecheck": "tsc -p . --noEmit"
   },
   "devDependencies": {
-    "@eslint/js": "^9.39.5",
-    "@types/node": "^20.0.0",
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^26.4.1",
     "@types/vscode": "^1.85.0",
-    "eslint": "^9.39.5",
-    "typescript": "^5.4.0",
+    "eslint": "^10.9.1",
+    "typescript": "^5.9.3",
     "typescript-eslint": "^8.69.0"
   }
 }
