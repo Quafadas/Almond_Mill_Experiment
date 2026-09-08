@@ -290,7 +290,7 @@ kernel too, since Ammonite puts its own classpath in scope there.
 | `scalaNotebook.ammoniteVersion` | string | `"3.0.8"` | Ammonite version behind the kernel, whose `repl`/`interp` bridges go in scope. Should match the Ammonite your Almond version embeds. Empty string leaves them out. |
 | `scalaNotebook.almondVersion` | string | `"0.14.5"` | Almond version whose predef the shadow file reproduces. Empty string leaves it out. |
 | `scalaNotebook.preamble` | string[] | `[]` | Extra lines inserted inside the wrapper object, after the Almond prelude and before the first cell. Behaves like a predef cell, so statements are allowed. |
-| `scalaNotebook.shadowDir` | string | `"notebook-shadow"` | Relative to the first workspace folder. |
+| `scalaNotebook.shadowDir` | string | `"notebook-shadow"` | Relative to the Mill build the notebook belongs to (nearest `build.mill`, `build.mill.yaml`, `build.mill.scala` or `.mill-version` at or above it), else the workspace folder root. |
 | `scalaNotebook.debounceMs` | number | `400` | Debounce between a notebook edit and shadow regeneration. |
 | `scalaNotebook.compileOnCreate` | boolean | `false` | Runs `./mill <shadowPath>:compile` once when a shadow file is first created. See Phase 0 findings — not required in practice, kept as an escape hatch. |
 

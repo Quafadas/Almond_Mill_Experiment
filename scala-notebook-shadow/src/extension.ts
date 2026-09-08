@@ -69,7 +69,27 @@ export function activate(context: vscode.ExtensionContext): void {
       if (!hasRelevantChange) {
         return;
       }
-      shadowManager.scheduleRegenerate(e.notebook);
+      // Also an adoption attempt: a notebook with no Scala code cell when it opened is
+      // skipped, and this is where it gets picked up once one appears.
+      void shadowManager.adoptOrRegenerate(e.notebook);
+    }),
+
+    // Switching a cell to Scala - picking the Almond kernel on a notebook that carried no
+    // Scala metadata - re-opens the cell's text document rather than changing the notebook,
+    // so it is the only signal that such a notebook has become eligible.
+    vscode.workspace.onDidOpenTextDocument((doc) => {
+      if (doc.uri.scheme !== "vscode-notebook-cell" || doc.languageId !== "scala") {
+        return;
+      }
+      const notebook = vscode.workspace.notebookDocuments.find(
+        (candidate) =>
+          candidate.notebookType === "jupyter-notebook" &&
+          !shadowManager.getStateForNotebook(candidate) &&
+          candidate.getCells().some((cell) => cell.document === doc)
+      );
+      if (notebook) {
+        void shadowManager.openForNotebook(notebook);
+      }
     }),
 
     vscode.workspace.onDidCloseNotebookDocument((notebook) => {

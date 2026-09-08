@@ -58,6 +58,15 @@
 - [x] Forward selection ranges (expand/shrink selection), cutting each chain where it grows
       past the cell so expanding stops at the cell boundary instead of selecting the wrapper
       object and then the whole shadow file.
+- [x] Pick up a notebook anywhere under the workspace, not only beside the Mill build: the
+      shadow goes in the nearest Mill build at or above the notebook (`build.mill`,
+      `build.mill.yaml`, `build.mill.scala`, `.mill-version`), falling back to the workspace
+      folder root. Previously the shadow always landed in the workspace folder root, so
+      opening a parent of the Mill project wrote it above the build where Mill never saw it -
+      the notebook was adopted and the shadow written, but no diagnostics ever arrived.
+- [x] Retry adoption for a notebook that had no Scala code cell when it opened. The check ran
+      once, at open, and a skipped notebook was never reconsidered, so choosing the kernel or
+      typing the first code cell afterwards left it without a shadow until it was reopened.
 - [ ] Suppress or rewrite hover text that exposes synthesized machinery (`resN_M` result
       names, the wrapper/nesting objects in an owner path).
 - [ ] Translate inlay-hint label links that point into the shadow script back to the defining
@@ -90,6 +99,8 @@
 - [x] Unit-test log level filtering, line formatting, scoping, and that a filtered-out
       thunk is never evaluated.
 - [x] Unit-test selection-chain truncation at the cell boundary.
+- [x] Unit-test Mill build-root discovery: nearest build above the notebook, the walk not
+      escaping the workspace folder, each marker on its own, and the no-build fallback.
 - [ ] Unit-test reference filtering (other notebooks' shadows, synthesized lines,
       de-duplication) - needs the async `resolveShadowSource`, so it waits on Extension Host tests.
 - [ ] Extract completion-result translation into pure, unit-testable functions.
