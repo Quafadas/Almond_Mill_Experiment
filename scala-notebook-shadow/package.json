@@ -127,7 +127,7 @@
     "@eslint/js": "^10.0.1",
     "@types/node": "^26.4.1",
     "@types/vscode": "^1.85.0",
-    "eslint": "^10.9.1",
+    "eslint": "^10.10.0",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.69.0"
   }
