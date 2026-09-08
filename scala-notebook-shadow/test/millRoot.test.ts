@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { test } from "node:test";
 import { ancestorDirectories, findMillRoot, MILL_ROOT_MARKERS } from "../src/millRoot";
 
-const p = (...segments: string[]) => path.join(path.sep, ...segments);
+const p = (...segments: string[]) => path.resolve(path.sep, ...segments);
 
 /** A predicate over a fixed set of existing files, as findMillRoot expects. */
 const filesystem = (existing: string[]) => (directory: string, marker: string) =>
