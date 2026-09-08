@@ -94,7 +94,7 @@
         "scalaNotebook.shadowDir": {
           "type": "string",
           "default": "notebook-shadow",
-          "description": "Directory, relative to the first workspace folder, where shadow .scala files are written."
+          "description": "Directory, relative to the Mill build the notebook belongs to, where shadow .scala files are written. The build is the nearest directory at or above the notebook holding a build.mill, build.mill.yaml, build.mill.scala or .mill-version, falling back to the workspace folder root."
         },
         "scalaNotebook.debounceMs": {
           "type": "number",

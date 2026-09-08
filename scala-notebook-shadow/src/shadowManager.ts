@@ -3,6 +3,7 @@ import * as path from "path";
 import * as vscode from "vscode";
 import { looksLikeGeneratedSource, parseGeneratedSourceHeader } from "./generatedSource";
 import { Logger, LogLevel } from "./log";
+import { ancestorDirectories, findMillRoot, MILL_ROOT_MARKERS } from "./millRoot";
 import { shadowBaseName } from "./shadowNaming";
 import { ScalaNotebookConfig, ShadowMapping, SourceCell, transform } from "./transform";
 
@@ -18,7 +19,9 @@ export interface ExtensionConfig extends ScalaNotebookConfig {
 export interface ShadowState {
   notebook: vscode.NotebookDocument;
   shadowUri: vscode.Uri;
-  /** Relative to the workspace folder, e.g. "notebook-shadow/sample.scala". Used for `./mill <path>:compile`. */
+  /** The Mill build the shadow lives in; the working directory `./mill` is invoked from. */
+  buildRootUri: vscode.Uri;
+  /** Relative to `buildRootUri`, e.g. "notebook-shadow/sample.scala". Used for `./mill <path>:compile`. */
   relativePath: string;
   /** Name of the object cells are wrapped in; unique per shadow file. */
   wrapperObjectName: string;
@@ -52,6 +55,12 @@ export class ShadowManager implements vscode.Disposable {
    */
   private readonly cellUriToNotebookUri = new Map<string, string>();
   private readonly notGeneratedSources = new Set<string>(); // URIs checked and ruled out
+  /**
+   * Notebooks whose openForNotebook is mid-flight, by notebook URI. Adoption is retried on
+   * every change to an untracked notebook, so without this a burst of keystrokes could run
+   * several opens concurrently - each seeing no state yet, and each writing the shadow.
+   */
+  private readonly opening = new Set<string>();
   private readonly analysisChangedEmitter = new vscode.EventEmitter<ShadowState>();
 
   /**
@@ -206,18 +215,77 @@ export class ShadowManager implements vscode.Disposable {
     return vscode.workspace.getWorkspaceFolder(notebook.uri) ?? vscode.workspace.workspaceFolders?.[0];
   }
 
+  /**
+   * The Mill build the notebook's shadow belongs in - the nearest build above it, else the
+   * workspace folder root. Only consulted once per notebook, on open, so the stats are cheap.
+   */
+  private async buildRoot(notebook: vscode.NotebookDocument, folder: vscode.WorkspaceFolder): Promise<vscode.Uri> {
+    const exists = async (uri: vscode.Uri): Promise<boolean> => {
+      try {
+        await vscode.workspace.fs.stat(uri);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    // findMillRoot takes a sync predicate, so probe the candidates first, then decide.
+    const probed = new Map<string, boolean>();
+    const notebookDir = path.dirname(notebook.uri.fsPath);
+    await Promise.all(
+      ancestorDirectories(notebookDir, folder.uri.fsPath).flatMap((directory) =>
+        MILL_ROOT_MARKERS.map(async (marker) => {
+          const candidate = path.join(directory, marker);
+          probed.set(candidate, await exists(vscode.Uri.file(candidate)));
+        })
+      )
+    );
+
+    const root = findMillRoot(notebookDir, folder.uri.fsPath, (directory, marker) =>
+      probed.get(path.join(directory, marker)) === true
+    );
+    if (!root) {
+      this.log.debug(`No Mill build found above ${notebook.uri.toString()}; using ${folder.uri.fsPath}`);
+      return folder.uri;
+    }
+    return vscode.Uri.file(root);
+  }
+
+  /**
+   * A notebook only becomes eligible once it has a Scala code cell, which can arrive after it
+   * opens: a kernel is chosen, or the first code cell is typed. So treat every change to an
+   * untracked notebook as another chance to adopt it, not just its open event.
+   */
+  async adoptOrRegenerate(notebook: vscode.NotebookDocument): Promise<void> {
+    if (this.states.has(notebook.uri.toString())) {
+      this.scheduleRegenerate(notebook);
+      return;
+    }
+    await this.openForNotebook(notebook);
+  }
+
   /** On notebook open: create the shadow file if needed, hold it open, register state. */
   async openForNotebook(notebook: vscode.NotebookDocument): Promise<void> {
     if (notebook.notebookType !== "jupyter-notebook") {
       return;
     }
-    if (this.states.has(notebook.uri.toString())) {
+    const notebookKey = notebook.uri.toString();
+    if (this.states.has(notebookKey) || this.opening.has(notebookKey)) {
       return;
     }
     if (!this.hasScalaCodeCell(notebook)) {
       return;
     }
 
+    this.opening.add(notebookKey);
+    try {
+      await this.createShadow(notebook);
+    } finally {
+      this.opening.delete(notebookKey);
+    }
+  }
+
+  private async createShadow(notebook: vscode.NotebookDocument): Promise<void> {
     const folder = this.workspaceFolder(notebook);
     if (!folder) {
       this.log.warn(`No workspace folder for ${notebook.uri.toString()}; skipping.`);
@@ -225,9 +293,12 @@ export class ShadowManager implements vscode.Disposable {
     }
 
     const config = this.getConfig();
-    const baseName = shadowBaseName(path.relative(folder.uri.fsPath, notebook.uri.fsPath));
+    const buildRootUri = await this.buildRoot(notebook, folder);
+    // Named relative to the build root, so the name is unique within the shadow directory
+    // that holds it without carrying the path from the workspace root as noise.
+    const baseName = shadowBaseName(path.relative(buildRootUri.fsPath, notebook.uri.fsPath));
     const relativePath = path.posix.join(config.shadowDir, `${baseName}.scala`);
-    const shadowUri = vscode.Uri.joinPath(folder.uri, config.shadowDir, `${baseName}.scala`);
+    const shadowUri = vscode.Uri.joinPath(buildRootUri, config.shadowDir, `${baseName}.scala`);
 
     const { text, mapping } = transform(this.toSourceCells(notebook), {
       ...config,
@@ -245,7 +316,7 @@ export class ShadowManager implements vscode.Disposable {
       this.log.info(`Created ${shadowUri.toString()} (object ${baseName})`);
 
       if (config.compileOnCreate) {
-        await this.compileOnce(folder, relativePath);
+        await this.compileOnce(buildRootUri, relativePath);
       }
     }
 
@@ -254,6 +325,7 @@ export class ShadowManager implements vscode.Disposable {
     const state: ShadowState = {
       notebook,
       shadowUri,
+      buildRootUri,
       relativePath,
       wrapperObjectName: baseName,
       mapping,
@@ -273,9 +345,9 @@ export class ShadowManager implements vscode.Disposable {
     }
   }
 
-  private compileOnce(folder: vscode.WorkspaceFolder, relativePath: string): Promise<void> {
+  private compileOnce(buildRootUri: vscode.Uri, relativePath: string): Promise<void> {
     return new Promise((resolve) => {
-      const child = cp.spawn("./mill", [`${relativePath}:compile`], { cwd: folder.uri.fsPath });
+      const child = cp.spawn("./mill", [`${relativePath}:compile`], { cwd: buildRootUri.fsPath });
       this.log.info(`./mill ${relativePath}:compile starting`);
       child.stdout?.on("data", (d: Buffer) => this.log.raw(d.toString()));
       child.stderr?.on("data", (d: Buffer) => this.log.raw(d.toString()));
