@@ -1,5 +1,4 @@
 import * as vscode from "vscode";
-import { BuildTool, isBuildTool } from "./buildTool";
 import { CONFIG_DEFAULTS } from "./configDefaults";
 import { LanguageFeatureRelay } from "./languageFeatures";
 import { isLogLevel, LogLevel, Logger } from "./log";
@@ -11,16 +10,10 @@ function readLogLevel(cfg: vscode.WorkspaceConfiguration): LogLevel {
   return isLogLevel(value) ? value : CONFIG_DEFAULTS.logLevel;
 }
 
-function readBuildTool(cfg: vscode.WorkspaceConfiguration): BuildTool {
-  const value = cfg.get<string>("buildTool", CONFIG_DEFAULTS.buildTool);
-  return isBuildTool(value) ? value : CONFIG_DEFAULTS.buildTool;
-}
-
 function readConfig(): ExtensionConfig {
   const cfg = vscode.workspace.getConfiguration("scalaNotebook");
   return {
     logLevel: readLogLevel(cfg),
-    buildTool: readBuildTool(cfg),
     completionResolveCount: cfg.get<number>("completionResolveCount", CONFIG_DEFAULTS.completionResolveCount),
     scalaVersion: cfg.get<string>("scalaVersion", CONFIG_DEFAULTS.scalaVersion),
     mvnDeps: cfg.get<string[]>("mvnDeps", CONFIG_DEFAULTS.mvnDeps),
@@ -29,7 +22,6 @@ function readConfig(): ExtensionConfig {
     ammoniteVersion: cfg.get<string>("ammoniteVersion", CONFIG_DEFAULTS.ammoniteVersion ?? ""),
     shadowDir: cfg.get<string>("shadowDir", CONFIG_DEFAULTS.shadowDir),
     debounceMs: cfg.get<number>("debounceMs", CONFIG_DEFAULTS.debounceMs),
-    compileOnCreate: cfg.get<boolean>("compileOnCreate", CONFIG_DEFAULTS.compileOnCreate),
     compileOnSave: cfg.get<boolean>("compileOnSave", CONFIG_DEFAULTS.compileOnSave),
   };
 }

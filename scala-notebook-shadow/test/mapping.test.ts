@@ -9,8 +9,6 @@ import {
   isAppendedColumn,
   positionWithinSpan,
   rangeWithinSpan,
-  rebaseDiagnostic,
-  rebaseRange,
   selectionChainWithinSpan,
   shadowLinkToCell,
   shadowPositionToCell,
@@ -130,38 +128,6 @@ test("translateDiagnostic: relatedInformation pointing at another file is droppe
   assert.deepEqual(result!.diagnostic.relatedInformation, []);
 });
 
-// --- Mill's generated copy ---------------------------------------------------
-
-test("rebaseDiagnostic shifts a generated-copy diagnostic into shadow coordinates", () => {
-  const generated = fakeUri("generated");
-  const shadow = fakeUri("shadow");
-  const rebased = rebaseDiagnostic(
-    {
-      range: { start: { line: 19, character: 4 }, end: { line: 19, character: 9 } },
-      message: "Not found: res1_2",
-      severity: 0,
-      relatedInformation: [
-        { uri: generated, range: { start: { line: 17, character: 0 }, end: { line: 17, character: 3 } }, message: "here" },
-        { uri: fakeUri("elsewhere"), range: { start: { line: 5, character: 0 }, end: { line: 5, character: 1 } }, message: "other" },
-      ],
-    },
-    generated,
-    shadow,
-    2
-  );
-
-  assert.deepEqual(rebased.range, { start: { line: 17, character: 4 }, end: { line: 17, character: 9 } });
-  assert.equal(rebased.relatedInformation?.[0].uri, shadow, "self-references are re-pointed at the shadow file");
-  assert.equal(rebased.relatedInformation?.[0].range.start.line, 15);
-  assert.equal(rebased.relatedInformation?.[1].range.start.line, 5, "other files are left alone");
-  assert.equal(rebased.message, "Not found: res1_2");
-});
-
-test("rebaseRange clamps at the top of the file rather than going negative", () => {
-  const clamped = rebaseRange({ start: { line: 0, character: 3 }, end: { line: 1, character: 0 } }, -2);
-  assert.deepEqual(clamped, { start: { line: 0, character: 3 }, end: { line: 0, character: 0 } });
-});
-
 // ---------------------------------------------------------------- rangeWithinSpan
 
 function range(startLine: number, startChar: number, endLine: number, endChar: number) {
@@ -187,7 +153,7 @@ test("rangeWithinSpan rejects a range ending after the span", () => {
 
 test("shadowLinkToCell maps a target in the requesting cell back to that cell", () => {
   const mapping = makeMapping();
-  const link = shadowLinkToCell(mapping, { targetRange: range(4, 0, 5, 3) }, 0);
+  const link = shadowLinkToCell(mapping, { targetRange: range(4, 0, 5, 3) });
   assert.equal(link?.cellUri.fragment, "cell1");
   assert.deepEqual(link?.targetRange, range(0, 0, 1, 3));
   assert.equal(link?.targetSelectionRange, undefined);
@@ -195,11 +161,10 @@ test("shadowLinkToCell maps a target in the requesting cell back to that cell", 
 
 test("shadowLinkToCell maps a target in a different cell to that other cell", () => {
   const mapping = makeMapping();
-  const link = shadowLinkToCell(
-    mapping,
-    { targetRange: range(7, 0, 9, 1), targetSelectionRange: range(8, 6, 8, 9) },
-    0
-  );
+  const link = shadowLinkToCell(mapping, {
+    targetRange: range(7, 0, 9, 1),
+    targetSelectionRange: range(8, 6, 8, 9),
+  });
   assert.equal(link?.cellUri.fragment, "cell2");
   assert.deepEqual(link?.targetRange, range(0, 0, 2, 1));
   assert.deepEqual(link?.targetSelectionRange, range(1, 6, 1, 9));
@@ -208,21 +173,14 @@ test("shadowLinkToCell maps a target in a different cell to that other cell", ()
 test("shadowLinkToCell picks the cell from the selection range, not the full range", () => {
   const mapping = makeMapping();
   // Full range opens on a synthesized line above the cell; the name range is what counts.
-  const link = shadowLinkToCell(mapping, { targetRange: range(3, 0, 5, 1), targetSelectionRange: range(4, 4, 4, 8) }, 0);
+  const link = shadowLinkToCell(mapping, { targetRange: range(3, 0, 5, 1), targetSelectionRange: range(4, 4, 4, 8) });
   assert.equal(link?.cellUri.fragment, "cell1");
-});
-
-test("shadowLinkToCell subtracts the generated-copy line offset before mapping", () => {
-  const mapping = makeMapping();
-  const link = shadowLinkToCell(mapping, { targetRange: range(24, 0, 25, 3) }, 20);
-  assert.equal(link?.cellUri.fragment, "cell1");
-  assert.deepEqual(link?.targetRange, range(0, 0, 1, 3));
 });
 
 test("shadowLinkToCell returns undefined for a target outside every cell", () => {
   const mapping = makeMapping();
   // Line 6 is a cell marker between cell1 and cell2, so there is no cell to point at.
-  assert.equal(shadowLinkToCell(mapping, { targetRange: range(6, 0, 6, 4) }, 0), undefined);
+  assert.equal(shadowLinkToCell(mapping, { targetRange: range(6, 0, 6, 4) }), undefined);
 });
 
 // ---------------------------------------------------------------- positionWithinSpan

@@ -6,8 +6,6 @@ import {
   PlainPosition,
   PlainRange,
   positionWithinSpan,
-  rebasePosition,
-  rebaseRange,
   selectionChainWithinSpan,
   rangeWithinSpan,
   shadowLinkToCell,
@@ -15,7 +13,8 @@ import {
   spanLineBounds,
 } from "./mapping";
 import { Logger } from "./log";
-import { DiagnosticSource, ExtensionConfig, ShadowManager, ShadowState } from "./shadowManager";
+import { looksLikeScalaCliGeneratedSource } from "./scalaCliBuild";
+import { ExtensionConfig, ShadowManager, ShadowState } from "./shadowManager";
 import { CellSpan } from "./transform";
 
 interface CellContext {
@@ -174,11 +173,8 @@ export class LanguageFeatureRelay
       return undefined;
     }
 
-    const translated = await Promise.all(
-      results.map(async (result) => {
-        const offset = await this.shadowLineOffsetFor(context, result);
-        return this.translateDefinition(context, result, offset);
-      })
+    const translated = results.map((result) =>
+      this.translateDefinition(context, result, this.targetsThisShadow(context, result))
     );
     this.log.debug(
       `${command}: ${results.length} result(s) at shadow ${context.shadowPosition.line}:${context.shadowPosition.character}`
@@ -187,39 +183,30 @@ export class LanguageFeatureRelay
   }
 
   /**
-   * How far to shift a definition target to reach shadow-file coordinates, or undefined if
-   * it doesn't point at this notebook's shadow at all (a library source, say) and so must
-   * be handed back untouched. Metals resolves definitions to Mill's generated `.dest/` copy
-   * rather than the shadow file, which is why this isn't a plain URI comparison.
+   * Whether a definition target points into *this* notebook's shadow, and so needs
+   * translating back to a cell. Anything else - a library source, another notebook's shadow -
+   * is handed back untouched.
    */
-  private async shadowLineOffsetFor(
+  private targetsThisShadow(
     context: RequestContext,
     definition: vscode.Location | vscode.LocationLink
-  ): Promise<number | undefined> {
+  ): boolean {
     const targetUri = "targetUri" in definition ? definition.targetUri : definition.uri;
-    if (!this.shadowManager.mightBeShadowSource(targetUri)) {
-      return undefined;
-    }
-    const resolved = await this.shadowManager.resolveShadowSource(targetUri);
-    return resolved && resolved.state === context.state ? resolved.lineOffset : undefined;
+    return targetUri.toString() === context.state.shadowUri.toString();
   }
 
   private translateDefinition(
     context: RequestContext,
     definition: vscode.Location | vscode.LocationLink,
-    shadowLineOffset: number | undefined
+    targetsShadow: boolean
   ): vscode.Location | vscode.LocationLink {
     const translate = (link: { targetRange: vscode.Range; targetSelectionRange?: vscode.Range }): CellLocationLink | undefined =>
-      shadowLineOffset === undefined
-        ? undefined
-        : shadowLinkToCell(
-            context.state.mapping,
-            {
-              targetRange: plainRange(link.targetRange),
-              targetSelectionRange: link.targetSelectionRange ? plainRange(link.targetSelectionRange) : undefined,
-            },
-            shadowLineOffset
-          );
+      targetsShadow
+        ? shadowLinkToCell(context.state.mapping, {
+            targetRange: plainRange(link.targetRange),
+            targetSelectionRange: link.targetSelectionRange ? plainRange(link.targetSelectionRange) : undefined,
+          })
+        : undefined;
 
     if ("targetUri" in definition) {
       const originSelectionRange = definition.originSelectionRange
@@ -352,10 +339,9 @@ export class LanguageFeatureRelay
       return undefined;
     }
 
-    const translated = await Promise.all(locations.map((location) => this.translateReference(context, location)));
+    const translated = locations.map((location) => this.translateReference(context, location));
 
-    // The same hit can arrive twice, once against the shadow file and once against Mill's
-    // copy of it; both translate to one cell location, and the peek view should show one.
+    // Two shadow hits can land on one cell location; the peek view should show it once.
     const seen = new Set<string>();
     const unique: vscode.Location[] = [];
     for (const location of translated) {
@@ -379,27 +365,20 @@ export class LanguageFeatureRelay
    * cell is dropped rather than returned as-is: it sits on a synthesized line, and every
    * result here is a place the user expects to be able to open and edit.
    */
-  private async translateReference(
-    context: RequestContext,
-    location: vscode.Location
-  ): Promise<vscode.Location | undefined> {
-    if (!this.shadowManager.mightBeShadowSource(location.uri)) {
+  private translateReference(context: RequestContext, location: vscode.Location): vscode.Location | undefined {
+    if (looksLikeScalaCliGeneratedSource(location.uri.fsPath)) {
+      // scala-cli's wrapper for some script - generated code either way, so never a result.
+      return undefined;
+    }
+    if (!this.shadowManager.isShadowUri(location.uri)) {
       return location;
     }
-    const resolved = await this.shadowManager.resolveShadowSource(location.uri);
-    if (!resolved) {
-      // A `.dest/` copy of some other Mill script, not a notebook shadow at all.
-      return location;
-    }
-    if (resolved.state !== context.state) {
+    if (location.uri.toString() !== context.state.shadowUri.toString()) {
+      // Another notebook's shadow.
       return undefined;
     }
 
-    const link = shadowLinkToCell(
-      context.state.mapping,
-      { targetRange: plainRange(location.range) },
-      resolved.lineOffset
-    );
+    const link = shadowLinkToCell(context.state.mapping, { targetRange: plainRange(location.range) });
     return link ? new vscode.Location(link.cellUri, vscodeRange(link.targetRange)) : undefined;
   }
 
@@ -418,57 +397,44 @@ export class LanguageFeatureRelay
       return undefined;
     }
 
-    // Metals answers definition and completion for the shadow file, but inlay hints come
-    // from the presentation compiler for a file that is genuinely a source of a build
-    // target - which is Mill's `.dest/` copy, not the script it was copied from. So try
-    // every file this shadow is known by, newest knowledge last, and take the first that
-    // has anything to say. The copy only refreshes when Mill compiles, so hints from it
-    // lag an edit in exactly the way diagnostics do.
-    for (const source of this.shadowManager.diagnosticSourcesFor(context.state)) {
-      const hints = await this.requestInlayHints(document, context, source, token);
-      if (token.isCancellationRequested) {
-        return undefined;
-      }
-      if (hints.length > 0) {
-        this.log.debug(
-          `inlayHints: cell ${context.span.cellIndex} got ${hints.length} hint(s) from ` +
-            `${source.uri.path.split("/").pop()} (+${source.lineOffset} lines)`
-        );
-        return hints;
-      }
+    // Hints come from the presentation compiler for a file that is genuinely a source of a
+    // build target. scala-cli compiles the `.sc` itself, so the shadow is that source and
+    // there is nothing else to ask - under Mill this had to try the `.dest/` copy too.
+    const hints = await this.requestInlayHints(document, context, token);
+    if (token.isCancellationRequested) {
+      return undefined;
     }
-
-    this.log.debug(`inlayHints: cell ${context.span.cellIndex} got nothing from any shadow source`);
-    return [];
+    this.log.debug(`inlayHints: cell ${context.span.cellIndex} got ${hints.length} hint(s) from the shadow`);
+    return hints;
   }
 
-  /** Ask one file that carries this cell's code for hints, and map what comes back into the cell. */
+  /** Ask the shadow for this cell's hints, and map what comes back into the cell. */
   private async requestInlayHints(
     cell: vscode.TextDocument,
     context: CellContext,
-    source: DiagnosticSource,
     token: vscode.CancellationToken
   ): Promise<vscode.InlayHint[]> {
+    const shadowUri = context.state.shadowUri;
     let sourceDocument: vscode.TextDocument;
     try {
-      sourceDocument = await vscode.workspace.openTextDocument(source.uri);
+      sourceDocument = await vscode.workspace.openTextDocument(shadowUri);
     } catch {
-      // A `.dest/` copy Mill has since cleaned up.
+      // The shadow was deleted from under us; the next regenerate writes it again.
       return [];
     }
 
     // A cell is small, so ask for its whole span rather than mapping the requested range;
     // everything we return is inside the cell either way.
     const { firstLine, lastLine } = spanLineBounds(context.span);
-    const first = firstLine + source.lineOffset;
-    const last = Math.min(lastLine + source.lineOffset, sourceDocument.lineCount - 1);
+    const first = firstLine;
+    const last = Math.min(lastLine, sourceDocument.lineCount - 1);
     if (last < first || token.isCancellationRequested) {
       return [];
     }
 
     const hints = await vscode.commands.executeCommand<vscode.InlayHint[]>(
       "vscode.executeInlayHintProvider",
-      source.uri,
+      shadowUri,
       new vscode.Range(new vscode.Position(first, 0), sourceDocument.lineAt(last).range.end)
     );
     if (!hints || token.isCancellationRequested) {
@@ -477,8 +443,7 @@ export class LanguageFeatureRelay
 
     const translated: vscode.InlayHint[] = [];
     for (const hint of hints) {
-      const shadowPosition = rebasePosition(plainPosition(hint.position), -source.lineOffset);
-      const position = positionWithinSpan(context.span, shadowPosition);
+      const position = positionWithinSpan(context.span, plainPosition(hint.position));
       if (!position || position.line >= cell.lineCount) {
         continue;
       }
@@ -489,17 +454,12 @@ export class LanguageFeatureRelay
       if (isAppendedColumn(position, cell.lineAt(position.line).text.length)) {
         continue;
       }
-      translated.push(this.translateInlayHint(context.span, hint, vscodePosition(position), source.lineOffset));
+      translated.push(this.translateInlayHint(context.span, hint, vscodePosition(position)));
     }
     return translated;
   }
 
-  private translateInlayHint(
-    span: CellSpan,
-    hint: vscode.InlayHint,
-    position: vscode.Position,
-    lineOffset: number
-  ): vscode.InlayHint {
+  private translateInlayHint(span: CellSpan, hint: vscode.InlayHint, position: vscode.Position): vscode.InlayHint {
     const translated = new vscode.InlayHint(position, this.translateInlayLabel(hint.label), hint.kind);
     translated.tooltip = hint.tooltip;
     translated.paddingLeft = hint.paddingLeft;
@@ -509,8 +469,7 @@ export class LanguageFeatureRelay
     // Keep them only if every one lands in this cell, so accepting can never edit a
     // synthesized line - a partial application would corrupt the cell.
     const edits = hint.textEdits?.map((edit) => {
-      const shadowRange = rebaseRange(plainRange(edit.range), -lineOffset);
-      const range = rangeWithinSpan(span, shadowRange);
+      const range = rangeWithinSpan(span, plainRange(edit.range));
       return range ? vscode.TextEdit.replace(vscodeRange(range), edit.newText) : undefined;
     });
     if (edits && edits.every((edit): edit is vscode.TextEdit => edit !== undefined)) {
@@ -530,7 +489,11 @@ export class LanguageFeatureRelay
       translated.command = part.command;
       // Ctrl-clicking a part jumps to the type it names. A target in generated code would
       // drop the user into the shadow file, so drop the link; library targets pass through.
-      if (part.location && !this.shadowManager.mightBeShadowSource(part.location.uri)) {
+      if (
+        part.location &&
+        !this.shadowManager.isShadowUri(part.location.uri) &&
+        !looksLikeScalaCliGeneratedSource(part.location.uri.fsPath)
+      ) {
         translated.location = part.location;
       }
       return translated;

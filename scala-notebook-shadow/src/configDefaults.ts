@@ -13,7 +13,6 @@ import type { ExtensionConfig } from "./shadowManager";
  */
 export const CONFIG_DEFAULTS: Readonly<ExtensionConfig> = {
   logLevel: "info",
-  buildTool: "mill",
   completionResolveCount: 30,
   scalaVersion: "3.7.2",
   mvnDeps: [],
@@ -22,6 +21,5 @@ export const CONFIG_DEFAULTS: Readonly<ExtensionConfig> = {
   ammoniteVersion: "3.0.8",
   shadowDir: "notebook-shadow",
   debounceMs: 400,
-  compileOnCreate: false,
   compileOnSave: true,
 };

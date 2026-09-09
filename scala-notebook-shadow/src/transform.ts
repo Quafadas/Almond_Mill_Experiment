@@ -1,5 +1,4 @@
 import type * as vscode from "vscode";
-import { BuildTool } from "./buildTool";
 import {
   definedNames,
   ScannedLine,
@@ -29,11 +28,6 @@ export interface ScalaNotebookConfig {
    * Empty or undefined leaves it out.
    */
   almondVersion?: string;
-  /**
-   * Build server the shadow script is written for, which decides how the header spells
-   * the Scala version, repositories and dependencies. Defaults to Mill.
-   */
-  buildTool?: BuildTool;
   /**
    * Identifier for the object every cell body is nested in (see `transform`).
    * Defaults to `NotebookCells`; ShadowManager passes the shadow file's base
@@ -76,10 +70,13 @@ export interface TransformResult {
 const DEFAULT_WRAPPER_OBJECT_NAME = "NotebookCells";
 
 /**
- * Scala 3 rejects statements at the top level of a `.scala` file ("Illegal start
- * of toplevel definition"), and Mill splices a script's body in at exactly that
- * position. Almond sidesteps this by wrapping each cell in an object, where a
- * bare statement is simply part of the template body; we wrap for the same reason.
+ * Almond wraps each cell in an object, where a bare statement is simply part of the
+ * template body; we wrap for the same reason, and additionally because the wrapper is what
+ * the redefinition-nesting scheme nests into (see `planScopes`) and what keeps two
+ * notebooks' shadows in one directory from colliding.
+ *
+ * A `.sc` script does allow top-level statements, so the wrapper is no longer load-bearing
+ * for that alone - whether it can go is issue #15 §5.7, unanswered.
  */
 const SCALA_KEYWORDS = new Set([
   "abstract", "case", "catch", "class", "def", "do", "else", "end", "enum", "export",
@@ -203,7 +200,7 @@ function prelude(config: ScalaNotebookConfig): Prelude {
 /**
  * Ammonite/Almond "magic" imports. None are legal Scala, so any line using one is
  * commented out to keep it from erroring. `$ivy`/`$dep`/`$repo` additionally feed the
- * Mill header; `$file`, `$plugin`, `$scalac` and `$profile` have no shadow-file
+ * `//> using` header; `$file`, `$plugin`, `$scalac` and `$profile` have no shadow-file
  * equivalent and are only neutralized.
  */
 const MAGIC_IMPORT_LINE_RE = /^\s*import\s+\$(?:ivy|dep|repo|file|plugin|scalac|profile)\b/;
@@ -268,14 +265,14 @@ function backtickedTerms(text: string): string[] {
 /**
  * Almond resolves a `_` version against its own build (e.g. `sh.almond::scala-kernel-api:_`).
  * We have no such mapping, so the coordinate is dropped rather than written into the
- * header, where Mill would fail to resolve it and bury every real diagnostic.
+ * header, where scala-cli would fail to resolve it and bury every real diagnostic.
  */
 function isResolvableCoordinate(coordinate: string): boolean {
   return !coordinate.endsWith(":_");
 }
 
 /**
- * If `line` is a magic import, record what it contributes to the Mill header and
+ * If `line` is a magic import, record what it contributes to the `//> using` header and
  * report true so the caller comments the line out. Returns false for ordinary Scala.
  */
 function collectMagicImports(line: string, into: MagicImports): boolean {
@@ -456,22 +453,6 @@ function planScopes(cells: PreparedCell[], preamble: string[]): boolean[] {
 }
 
 /**
- * Mill's script header: one YAML mapping, commented with `//|`, whose keys mirror the
- * `ScalaModule` overrides the script becomes.
- */
-function millHeader(scalaVersion: string, repositories: string[], deps: string[]): string[] {
-  const lines = [`//| scalaVersion: ${scalaVersion}`];
-  if (repositories.length > 0) {
-    lines.push("//| repositories:", ...repositories.map((repository) => `//| - ${repository}`));
-  }
-  if (deps.length > 0) {
-    lines.push("//| mvnDeps:", ...deps.map((dep) => `//| - ${dep}`));
-  }
-  lines.push("//| scalacOptions:", `//| - ${PURE_EXPRESSION_WCONF}`);
-  return lines;
-}
-
-/**
  * A scala-cli directive value is a whitespace-separated token, so a value containing a
  * space has to be double-quoted or scala-cli reads only its first word and rejects the
  * rest. Only `-Wconf` hits this today, but a coordinate or repository URL arriving from a
@@ -482,27 +463,16 @@ function directiveValue(value: string): string {
 }
 
 /**
- * scala-cli's `//> using` directives: one per line, and no `deps:`-style grouping, so each
+ * The script's `//> using` directives: one per line, and no `deps:`-style grouping, so each
  * dependency is its own directive rather than an item under a key.
  */
-function scalaCliHeader(scalaVersion: string, repositories: string[], deps: string[]): string[] {
+function header(scalaVersion: string, repositories: string[], deps: string[]): string[] {
   return [
     `//> using scala ${directiveValue(scalaVersion)}`,
     ...repositories.map((repository) => `//> using repository ${directiveValue(repository)}`),
     ...deps.map((dep) => `//> using dep ${directiveValue(dep)}`),
     `//> using option ${directiveValue(PURE_EXPRESSION_WCONF)}`,
   ];
-}
-
-function header(
-  buildTool: BuildTool | undefined,
-  scalaVersion: string,
-  repositories: string[],
-  deps: string[]
-): string[] {
-  return buildTool === "scala-cli"
-    ? scalaCliHeader(scalaVersion, repositories, deps)
-    : millHeader(scalaVersion, repositories, deps);
 }
 
 /**
@@ -533,7 +503,7 @@ export function transform(cells: SourceCell[], config: ScalaNotebookConfig): Tra
   const allDeps = dedupe([...predef.mvnDeps, ...config.mvnDeps, ...magic.mvnDeps]);
   const repositories = dedupe([...predef.repositories, ...magic.repositories]);
 
-  const directives = header(config.buildTool, config.scalaVersion, repositories, allDeps);
+  const directives = header(config.scalaVersion, repositories, allDeps);
 
   const outLines: string[] = [...directives, `object ${wrapperObjectName(config)} {`, ...preamble];
   const headerLines = outLines.length;

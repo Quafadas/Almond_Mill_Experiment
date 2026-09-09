@@ -1,7 +1,7 @@
 {
   "name": "scala-notebook-shadow",
   "displayName": "Scala Notebook Shadow (POC)",
-  "description": "Shows Metals compile diagnostics as squiggles in Scala Jupyter notebook cells via a hidden Mill shadow script.",
+  "description": "Shows Metals compile diagnostics as squiggles in Scala Jupyter notebook cells via a hidden scala-cli shadow script.",
   "version": "0.0.3",
   "private": true,
   "publisher": "almond-mill-experiment",
@@ -63,7 +63,7 @@
         "scalaNotebook.scalaVersion": {
           "type": "string",
           "default": "3.7.2",
-          "description": "Scala version written into the shadow file's `//| scalaVersion` header. Must match the kernel you run, otherwise phantom errors."
+          "description": "Scala version written into the shadow file's `//> using scala` directive. Must match the kernel you run, otherwise phantom errors."
         },
         "scalaNotebook.mvnDeps": {
           "type": "array",
@@ -71,17 +71,17 @@
             "type": "string"
           },
           "default": [],
-          "description": "Mill coordinates written into the shadow file's `//| mvnDeps` header, e.g. com.lihaoyi::upickle:4.0.2. Merged with dependencies discovered from `import $ivy` lines."
+          "description": "Dependency coordinates written into the shadow file as `//> using dep` directives, e.g. com.lihaoyi::upickle:4.0.2. Merged with dependencies discovered from `import $ivy` lines."
         },
         "scalaNotebook.almondVersion": {
           "type": "string",
           "default": "0.14.5",
-          "description": "Almond version whose predef the shadow file reproduces: adds `sh.almond::jupyter-api:<version>` to `//| mvnDeps`, JitPack to `//| repositories`, and Almond's predef imports (Markdown, Html, publish, ...) before the first cell. Set to an empty string to leave the prelude out."
+          "description": "Almond version whose predef the shadow file reproduces: adds a `//> using dep sh.almond::jupyter-api:<version>` directive, a `//> using repository` for JitPack, and Almond's predef imports (Markdown, Html, publish, ...) before the first cell. Set to an empty string to leave the prelude out."
         },
         "scalaNotebook.ammoniteVersion": {
           "type": "string",
           "default": "3.0.8",
-          "description": "Ammonite version behind the kernel, whose `repl` and `interp` bridges the shadow file puts in scope: adds `com.lihaoyi:ammonite-repl-api_3.3.7:<version>` to `//| mvnDeps` and the bridge imports before the first cell. Should match the Ammonite your Almond version embeds. Set to an empty string to leave them out."
+          "description": "Ammonite version behind the kernel, whose `repl` and `interp` bridges the shadow file puts in scope: adds a `//> using dep com.lihaoyi:ammonite-repl-api_3.3.7:<version>` directive and the bridge imports before the first cell. Should match the Ammonite your Almond version embeds. Set to an empty string to leave them out."
         },
         "scalaNotebook.preamble": {
           "type": "array",
@@ -91,38 +91,20 @@
           "default": [],
           "description": "Lines inserted after the header, before the first cell (e.g. Almond predef imports)."
         },
-        "scalaNotebook.buildTool": {
-          "type": "string",
-          "enum": [
-            "mill",
-            "scala-cli"
-          ],
-          "enumDescriptions": [
-            "Emit a Mill script (.scala with a //| header). Needs a Mill build above the notebook, and a \"Metals: Import Build\" for every new notebook and every changed dependency.",
-            "Emit a scala-cli script (.sc with //> using directives). Metals starts its own scala-cli build server for the shadow directory; experimental, see issue #15."
-          ],
-          "default": "mill",
-          "description": "Build server the shadow scripts are written for. Changing this renames the shadow file; delete the old one by hand."
-        },
         "scalaNotebook.shadowDir": {
           "type": "string",
           "default": "notebook-shadow",
-          "description": "Directory, relative to the Mill build the notebook belongs to, where shadow .scala files are written. The build is the nearest directory at or above the notebook holding a build.mill, build.mill.yaml, build.mill.scala or .mill-version, falling back to the workspace folder root."
+          "description": "Directory, relative to the first workspace folder, where shadow .sc files are written. Metals starts a scala-cli build server for it on its own; no build file is needed."
         },
         "scalaNotebook.debounceMs": {
           "type": "number",
           "default": 400,
           "description": "Milliseconds to debounce shadow file regeneration after a notebook edit."
         },
-        "scalaNotebook.compileOnCreate": {
-          "type": "boolean",
-          "default": false,
-          "description": "Run `./mill <shadowPath>:compile` once when a shadow file is first created. Only needed if Metals/Mill require it before reporting diagnostics for a brand-new script (see README Phase 0 findings)."
-        },
         "scalaNotebook.compileOnSave": {
           "type": "boolean",
           "default": true,
-          "description": "Ask Metals to cascade-compile the workspace after a regenerated shadow file is saved, so diagnostics refresh without reimporting the build."
+          "description": "Ask Metals to cascade-compile the workspace after a regenerated shadow file is saved, so diagnostics refresh promptly."
         }
       }
     }

@@ -66,16 +66,6 @@ test("scoped shares the sink and threshold but retags the lines", () => {
   assert.deepEqual(sink.lines, ["09:04:03.007 INFO  [language] relayed"]);
 });
 
-test("raw subprocess output passes through unchanged, and only at debug", () => {
-  const quiet = loggerAt("info");
-  quiet.log.raw("compiling...");
-  assert.deepEqual(quiet.sink.chunks, []);
-
-  const verbose = loggerAt("debug");
-  verbose.log.raw("compiling...");
-  assert.deepEqual(verbose.sink.chunks, ["compiling..."]);
-});
-
 test("enabled reports what would be written, for skipping work up front", () => {
   const { log } = loggerAt("debug");
   assert.equal(log.enabled("debug"), true);

@@ -38,42 +38,6 @@ export interface TranslatedDiagnostic {
   diagnostic: PlainDiagnostic;
 }
 
-/** Shift a range by whole lines, clamping at the top of the file. */
-export function rebaseRange(range: PlainRange, lineDelta: number): PlainRange {
-  return {
-    start: { line: Math.max(range.start.line + lineDelta, 0), character: range.start.character },
-    end: { line: Math.max(range.end.line + lineDelta, 0), character: range.end.character },
-  };
-}
-
-/**
- * Translate a diagnostic reported against Mill's generated copy of a shadow script into
- * the shadow file's own coordinates, so the rest of the pipeline never has to know the
- * copy exists. Self-referencing relatedInformation is re-pointed at the shadow file too.
- */
-export function rebaseDiagnostic(
-  diagnostic: PlainDiagnostic,
-  generatedUri: vscode.Uri,
-  shadowUri: vscode.Uri,
-  lineOffset: number
-): PlainDiagnostic {
-  const generatedKey = generatedUri.toString();
-  return {
-    ...diagnostic,
-    range: rebaseRange(diagnostic.range, -lineOffset),
-    relatedInformation: diagnostic.relatedInformation?.map((info) =>
-      info.uri.toString() === generatedKey
-        ? { uri: shadowUri, range: rebaseRange(info.range, -lineOffset), message: info.message }
-        : info
-    ),
-  };
-}
-
-/** Shift a position by whole lines, clamping at the top of the file. */
-export function rebasePosition(position: PlainPosition, lineDelta: number): PlainPosition {
-  return { line: Math.max(position.line + lineDelta, 0), character: position.character };
-}
-
 export function cellPositionToShadow(span: CellSpan, position: PlainPosition): PlainPosition {
   return { line: span.startLine + position.line, character: position.character };
 }
@@ -273,20 +237,14 @@ export interface CellLocationLink {
  * Translate a definition/implementation/reference target that lands in a shadow script back
  * to the notebook cell it was generated from.
  *
- * `lineOffset` is how far the file the target was reported against sits below the shadow
- * file - non-zero when Metals resolved into Mill's generated `.dest/` copy. Returns
- * undefined when the target lands outside every cell (the header, a cell marker, a
+ * Returns undefined when the target lands outside every cell (the header, a cell marker, a
  * synthesized `resN_M` binding), which the caller should treat as "leave the result alone".
  */
 export function shadowLinkToCell(
   mapping: ShadowMapping,
-  link: ShadowLocationLink,
-  lineOffset: number
+  link: ShadowLocationLink
 ): CellLocationLink | undefined {
-  const targetRange = rebaseRange(link.targetRange, -lineOffset);
-  const targetSelectionRange = link.targetSelectionRange
-    ? rebaseRange(link.targetSelectionRange, -lineOffset)
-    : undefined;
+  const { targetRange, targetSelectionRange } = link;
 
   // Prefer the name range to decide which cell owns the target: a definition's full range
   // can start on a line the cell doesn't own (a leading annotation, say).

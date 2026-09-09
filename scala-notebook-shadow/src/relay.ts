@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
-import { looksLikeScalaCliGeneratedSource } from "./generatedSource";
-import { groupByCellUri, PlainDiagnostic, rebaseDiagnostic, translateDiagnostic, TranslatedDiagnostic } from "./mapping";
+import { groupByCellUri, PlainDiagnostic, translateDiagnostic, TranslatedDiagnostic } from "./mapping";
 import { Logger } from "./log";
+import { looksLikeScalaCliGeneratedSource } from "./scalaCliBuild";
 import { ShadowManager, ShadowState } from "./shadowManager";
 
 function toPlain(diagnostic: vscode.Diagnostic): PlainDiagnostic {
@@ -67,8 +67,9 @@ export class DiagnosticRelay {
   /** Handler for vscode.languages.onDidChangeDiagnostics. */
   onDidChangeDiagnostics(e: vscode.DiagnosticChangeEvent): void {
     for (const uri of e.uris) {
-      if (this.shadowManager.mightBeShadowSource(uri)) {
-        void this.relay(uri);
+      const state = this.shadowManager.getStateForShadowUri(uri);
+      if (state) {
+        this.publish(state);
       } else if (looksLikeScalaCliGeneratedSource(uri.fsPath)) {
         // Not relayed - see looksLikeScalaCliGeneratedSource. Logged so issue #15 §5.4 can be
         // answered from a session rather than guessed at.
@@ -79,31 +80,13 @@ export class DiagnosticRelay {
     }
   }
 
-  private async relay(uri: vscode.Uri): Promise<void> {
-    const resolved = await this.shadowManager.resolveShadowSource(uri);
-    if (!resolved) {
-      return;
-    }
-    this.publish(resolved.state);
-  }
-
-  /**
-   * Recompute a notebook's cell diagnostics from *every* file they can arrive on - the
-   * shadow file and each Mill `.dest/` copy of it. Recomputing the union rather than
-   * handling one URI keeps an empty event on one source from wiping the other's findings.
-   */
+  /** Recompute a notebook's cell diagnostics from what Metals currently reports on its shadow. */
   private publish(state: ShadowState): void {
     const translated: TranslatedDiagnostic[] = [];
-    for (const source of this.shadowManager.diagnosticSourcesFor(state)) {
-      for (const diagnostic of vscode.languages.getDiagnostics(source.uri)) {
-        const plain =
-          source.lineOffset === 0
-            ? toPlain(diagnostic)
-            : rebaseDiagnostic(toPlain(diagnostic), source.uri, state.shadowUri, source.lineOffset);
-        const result = translateDiagnostic(state.mapping, state.shadowUri, plain);
-        if (result) {
-          translated.push(result);
-        }
+    for (const diagnostic of vscode.languages.getDiagnostics(state.shadowUri)) {
+      const result = translateDiagnostic(state.mapping, state.shadowUri, toPlain(diagnostic));
+      if (result) {
+        translated.push(result);
       }
     }
 
@@ -119,9 +102,7 @@ export class DiagnosticRelay {
     }
 
     this.log.debug(
-      () =>
-        `${state.relativePath}: ${translated.length} diagnostic(s) across ${grouped.size} cell(s)` +
-        ` from ${this.shadowManager.diagnosticSourcesFor(state).length} source file(s)`
+      () => `${state.relativePath}: ${translated.length} diagnostic(s) across ${grouped.size} cell(s)`
     );
 
     // Diagnostics landing is the clearest signal that Metals has re-analyzed the shadow,
