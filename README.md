@@ -388,7 +388,7 @@ dependency on the `vscode` module and all run under plain `node --test`.
 | 5 | An error on cell 1's second line squiggles at line 1, not line 0 or another cell | Covered by unit test (`mapping.test.ts` translateDiagnostic tests) for the line-arithmetic part; live verification needed |
 | 6 | `import $ivy` cell: header gains the dep, line is commented in place, no error after reimport | Transform behavior covered by unit tests (`transform.test.ts` $ivy tests); per Phase 0, a manual `Metals: Import Build` (possibly plus a clean) is required and is **not** automated — this is a documented manual step, not a bug |
 | 7 | Closing/reopening the notebook clears then restores squiggles without duplicating the shadow file | Implemented (`closeForNotebook` clears diagnostics and drops state; `openForNotebook` no-ops if the file already exists and reconciles `appliedText` from disk) — needs live verification |
-| 8 | Unit tests pass | **Pass** — 137/137 (`npm test` in `scala-notebook-shadow/`) |
+| 8 | Unit tests pass | **Pass** — 148/148 (`npm test` in `scala-notebook-shadow/`). `tsc` does not delete stale output, so a tree that predates the Mill removal runs deleted tests too and reports a higher count; remove `out/` to get this one. |
 
 Everything gated on "needs a live VS Code + Metals + scala-cli session" could not be executed in this
 environment (no VS Code extension host / Metals server available here); the code paths implementing

@@ -558,7 +558,7 @@ test("each dependency and repository gets its own directive, with no grouping ke
   assert.ok(!text.includes("repositories:"));
 });
 
-test("the -Wconf option is quoted, whose value contains spaces", () => {
+test("the -Wconf options are quoted, whose values contain spaces", () => {
   // A directive value is a whitespace-separated token: unquoted, scala-cli reads
   // `-Wconf:msg=A` and rejects `pure`, `expression`, ... as unknown directive values.
   const cells = [cell(0, "val n = 2\n"), cell(1, "n + 1\n")];
@@ -567,6 +567,34 @@ test("the -Wconf option is quoted, whose value contains spaces", () => {
   assert.ok(
     text.includes('//> using option "-Wconf:msg=A pure expression does nothing in statement position:s"\n')
   );
+  assert.ok(text.includes('//> using option "-Wconf:msg=Line is indented too far to the left:s"\n'));
+});
+
+test("each -Wconf gets its own option directive", () => {
+  // scala-cli takes one value per `using option`; two suppressions under one directive
+  // would make the second an unknown value rather than a second flag.
+  const cells = [cell(0, "1 + 1\n")];
+  const { text } = transform(cells, baseConfig);
+  const options = text.split("\n").filter((line) => line.startsWith("//> using option "));
+
+  assert.equal(options.length, 2);
+  for (const option of options) {
+    assert.match(option, /^\/\/> using option "[^"]*"$/, `one quoted value in ${option}`);
+  }
+});
+
+test("an indented first line in a cell does not warn later cells to the left", () => {
+  // Scala 3 takes a brace region's indent width from its first body line, and warns on
+  // every later line left of it. Cells are copied verbatim, so a cell that opens indented
+  // sets a width the cells after it fall under - suppressed in the header, since
+  // re-indenting would move columns the mapping treats as identical.
+  const cells = [cell(0, "  val indented = 1\n"), cell(1, "val flush = 2\n")];
+  const { text, mapping } = transform(cells, baseConfig);
+  const lines = text.split("\n");
+
+  assert.equal(lines[mapping.spans[0].startLine], "  val indented = 1");
+  assert.equal(lines[mapping.spans[1].startLine], "val flush = 2");
+  assert.ok(text.includes('//> using option "-Wconf:msg=Line is indented too far to the left:s"\n'));
 });
 
 test("directive order puts the Scala version first and the option last", () => {

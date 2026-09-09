@@ -43,6 +43,14 @@
 - [x] Name a shadow script after the notebook's path within the workspace, so one notebook
       maps to one shadow file. Replaces a name-handout registry that never released names on
       close, which gave a reopened notebook a second shadow (`sample.scala`, `sample_2.scala`).
+- [x] Keep that name unique and short enough to compile. Sanitizing a path into one identifier
+      is lossy, so `a_b/x.ipynb`, `a-b/x.ipynb` and `a/b_x.ipynb` all became `a_b_x`, and a
+      notebook under non-ASCII directories lost them entirely and became its basename - each
+      collision silently sharing one shadow. A name that isn't a faithful rendering of its path
+      now carries a hash of the path, and every name is capped at 200 characters. Measured
+      ceiling on macOS/APFS with scala-cli 3.7.2: at 241 characters scalac can't write
+      `<base>$package$.class` and no cell ever gets a diagnostic, while the `.sc` itself writes
+      up to 252 - so the shadow looked healthy and was never compiled.
 - [x] ~~Ask every file a shadow is known by for inlay hints, not just the shadow script.~~
       Was needed because Metals answered inlay hints only for a real build-target source, which
       under Mill was the `.dest/` copy rather than the script. scala-cli compiles the `.sc`
@@ -77,17 +85,6 @@
       type. The relay still refuses to guess a line offset for a `.scala-build/` path and logs
       it at `debug`; if that ever fires, the offset plumbing comes back in a different shape
       (matched by name, since the wrapper carries no marker).
-- [ ] Answer issue #15 §5.5/§5.6: whether a second `.sc` and a changed `//> using dep` are
-      picked up without a restart, and whether a bad coordinate recovers. These are the direct
-      replacements for Mill's reimport and reimport-plus-clean, and the whole reason for the
-      switch - until they are measured, the costs are moved rather than known to be gone.
-- [ ] Answer issue #15 §5.7: whether the wrapper object and the `-Wconf` are still needed in a
-      `.sc`, where top-level statements are already legal. If not, the emitter loses both and
-      every cell line maps one-to-one with no wrapper offset.
-- [ ] Suppress or rewrite hover text that exposes synthesized machinery (`resN_M` result
-      names, the wrapper/nesting objects in an owner path).
-- [ ] Translate inlay-hint label links that point into the shadow script back to the defining
-      cell, rather than stripping them.
 - [x] Forward code actions (Metals' quick fixes and refactors), translating the `WorkspaceEdit`
       each one carries back into cell edits. The diagnostics a quick fix keys off need **no**
       back-translation, contrary to the note this entry used to carry:
@@ -126,6 +123,31 @@
       code actions on every caret move to decide whether to show the lightbulb, so only a
       deliberate invocation (`CodeActionTriggerKind.Invoke`) synchronizes first; semantic tokens
       and document symbols follow the shadow like inlay hints do.
+- [ ] Answer issue #15 §5.5/§5.6: whether a second `.sc` and a changed `//> using dep` are
+      picked up without a restart, and whether a bad coordinate recovers. These are the direct
+      replacements for Mill's reimport and reimport-plus-clean, and the whole reason for the
+      switch - until they are measured, the costs are moved rather than known to be gone.
+- [ ] Answer issue #15 §5.7: whether the wrapper object and the `-Wconf` are still needed in a
+      `.sc`, where top-level statements are already legal. If not, the emitter loses both and
+      every cell line maps one-to-one with no wrapper offset.
+- [x] Log a failure to create or regenerate a shadow. Both entry points ran with nothing
+      waiting on them - `extension.ts` calls `openForNotebook` with `void`, and the debounce
+      timer did the same with `regenerate` - so a throw was an unhandled rejection in the
+      extension host log: no shadow, or a shadow silently frozen at its last good text, with
+      nothing in our own log saying why. Message at `error`, stack at `debug`.
+- [x] Suppress "Line is indented too far to the left" in the generated header. Scala 3 takes
+      a brace region's indent width from its *first* body line and warns on every later line
+      left of it, so one cell that opens indented squiggles every cell after it in the same
+      scope - a warning about generated structure, on code the user wrote correctly.
+      Re-indenting the bodies would move the columns the mapping treats as identical (and
+      change the value of any `"""` literal); formatting the script would move its lines -
+      scalafmt breaks an appended `val resN_M = (` off its cell-marker line. So it is a
+      second `//> using option -Wconf`, beside the pure-expression one. An actually missing
+      `}` still fails to parse and reports on its own.
+- [ ] Suppress or rewrite hover text that exposes synthesized machinery (`resN_M` result
+      names, the wrapper/nesting objects in an owner path).
+- [ ] Translate inlay-hint label links that point into the shadow script back to the defining
+      cell, rather than stripping them.
 - [ ] Put the completion path's out-of-cell edits through `shadowEditsToCells` too. It re-homes
       them by collapsing the range to the cell's start, which keeps the text and so does the
       right thing for an insertion, but silently turns a header *replacement* into an insertion
@@ -157,13 +179,17 @@
 - [x] Unit-test cell-relative position translation and whole-span shadow ranges
       (`positionWithinSpan`, `spanShadowRange`), which inlay hints are built on.
 - [x] Unit-test shadow-script naming: stability across reopens, nested paths, notebooks
-      sharing a basename, and names Scala can't hold as identifiers.
+      sharing a basename, and names Scala can't hold as identifiers. Also that lossily
+      sanitized paths stay distinct, that the length cap holds for faithful and hashed names
+      alike, and that truncation leaves a legal identifier.
 - [x] Unit-test log level filtering, line formatting, scoping, and that a filtered-out
       thunk is never evaluated.
 - [x] Unit-test selection-chain truncation at the cell boundary.
 - [x] Unit-test the `//> using` header: directive spellings, one directive per dependency and
       repository, the quoted `-Wconf` value, ordering, and `$ivy` deduplication.
 - [x] Golden-test the shadow the fixture notebook produces, whole.
+- [x] Unit-test that each `-Wconf` gets its own quoted `//> using option`, and that a cell
+      whose first line is indented is still emitted verbatim.
 - [x] Unit-test that scala-cli's `.scala-build/` wrappers are recognised, so generated code is
       never offered as a reference or an inlay-hint link.
 - [x] Unit-test shadow-to-cell edit translation: in-cell edits, grouping by cell, an edit

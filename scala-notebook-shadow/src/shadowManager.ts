@@ -20,6 +20,21 @@ export interface ExtensionConfig extends ScalaNotebookConfig {
  */
 const SHADOW_FILE_EXTENSION = ".sc";
 
+/**
+ * Every shadow operation is started from an event handler or a timer with nothing waiting
+ * on it, so a rejection has nowhere to surface: it becomes an unhandled rejection in the
+ * extension host log, and the notebook just never gets language features with nothing
+ * saying why. These render one for the extension's own log instead.
+ */
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** The stack, for `debug`, where the message alone doesn't say where the failure came from. */
+function errorStack(error: unknown): string {
+  return error instanceof Error && error.stack ? error.stack : String(error);
+}
+
 /** What a shadow written by the previous, Mill-targeted version of the extension was called. */
 const LEGACY_MILL_SHADOW_EXTENSION = ".scala";
 
@@ -222,6 +237,12 @@ export class ShadowManager implements vscode.Disposable {
     this.opening.add(notebookKey);
     try {
       await this.createShadow(notebook);
+    } catch (error) {
+      // No state was registered, so the notebook stays eligible: the next edit comes back
+      // through adoptOrRegenerate and tries again, which is what recovers a shadow
+      // directory that was missing or read-only when the notebook first opened.
+      this.log.error(`Failed to create a shadow for ${notebook.uri.fsPath}: ${describeError(error)}`);
+      this.log.debug(() => errorStack(error));
     } finally {
       this.opening.delete(notebookKey);
     }
@@ -296,7 +317,10 @@ export class ShadowManager implements vscode.Disposable {
     const debounceMs = this.getConfig().debounceMs;
     state.debounceHandle = setTimeout(() => {
       state.debounceHandle = undefined;
-      void this.regenerate(notebook, false);
+      void this.regenerate(notebook, false).catch((error: unknown) => {
+        this.log.error(`Failed to regenerate ${state.relativePath}: ${describeError(error)}`);
+        this.log.debug(() => errorStack(error));
+      });
     }, debounceMs);
   }
 
@@ -360,8 +384,8 @@ export class ShadowManager implements vscode.Disposable {
       try {
         await vscode.commands.executeCommand("metals.compile-cascade");
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        this.log.error(`Metals compile failed to start: ${message}`);
+        this.log.error(`Metals compile failed to start: ${describeError(error)}`);
+        this.log.debug(() => errorStack(error));
       }
     }
   }
