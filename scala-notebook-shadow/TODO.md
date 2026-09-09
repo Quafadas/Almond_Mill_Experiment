@@ -43,6 +43,14 @@
 - [x] Name a shadow script after the notebook's path within the workspace, so one notebook
       maps to one shadow file. Replaces a name-handout registry that never released names on
       close, which gave a reopened notebook a second shadow (`sample.scala`, `sample_2.scala`).
+- [x] Keep that name unique and short enough to compile. Sanitizing a path into one identifier
+      is lossy, so `a_b/x.ipynb`, `a-b/x.ipynb` and `a/b_x.ipynb` all became `a_b_x`, and a
+      notebook under non-ASCII directories lost them entirely and became its basename - each
+      collision silently sharing one shadow. A name that isn't a faithful rendering of its path
+      now carries a hash of the path, and every name is capped at 200 characters. Measured
+      ceiling on macOS/APFS with scala-cli 3.7.2: at 241 characters scalac can't write
+      `<base>$package$.class` and no cell ever gets a diagnostic, while the `.sc` itself writes
+      up to 252 - so the shadow looked healthy and was never compiled.
 - [x] ~~Ask every file a shadow is known by for inlay hints, not just the shadow script.~~
       Was needed because Metals answered inlay hints only for a real build-target source, which
       under Mill was the `.dest/` copy rather than the script. scala-cli compiles the `.sc`
@@ -110,7 +118,9 @@
 - [x] Unit-test cell-relative position translation and whole-span shadow ranges
       (`positionWithinSpan`, `spanShadowRange`), which inlay hints are built on.
 - [x] Unit-test shadow-script naming: stability across reopens, nested paths, notebooks
-      sharing a basename, and names Scala can't hold as identifiers.
+      sharing a basename, and names Scala can't hold as identifiers. Also that lossily
+      sanitized paths stay distinct, that the length cap holds for faithful and hashed names
+      alike, and that truncation leaves a legal identifier.
 - [x] Unit-test log level filtering, line formatting, scoping, and that a filtered-out
       thunk is never evaluated.
 - [x] Unit-test selection-chain truncation at the cell boundary.
