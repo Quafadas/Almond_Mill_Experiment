@@ -71,11 +71,12 @@
       `./mill <path>:compile` escape hatch, and the `.dest/`-copy relay with its marker parsing
       and line-offset plumbing. One Mill script was one build target, which is where the
       reimport-per-notebook and reimport-plus-clean-per-`$ivy` costs came from.
-- [ ] Answer issue #15 §5.4: which file Metals reports scala-cli diagnostics against. If it is
-      the `.scala-build/` wrapper rather than the `.sc`, nothing reaches the cells today - the
-      copy carries no marker naming its source, so the relay logs the URI at `debug` and refuses
-      to guess a line offset. The offset plumbing that Mill needed was deleted with it; if this
-      comes back positive it returns in a different shape (matched by name, not by marker).
+- [x] Issue #15 §5.4, observed: squiggles reach the cells, so Metals reports against the `.sc`
+      itself and not scala-cli's `.scala-build/` wrapper. One manual session, not a recorded
+      probe run - versions uncaptured, and the wrapper case not ruled out for every request
+      type. The relay still refuses to guess a line offset for a `.scala-build/` path and logs
+      it at `debug`; if that ever fires, the offset plumbing comes back in a different shape
+      (matched by name, since the wrapper carries no marker).
 - [ ] Answer issue #15 §5.5/§5.6: whether a second `.sc` and a changed `//> using dep` are
       picked up without a restart, and whether a bad coordinate recovers. These are the direct
       replacements for Mill's reimport and reimport-plus-clean, and the whole reason for the

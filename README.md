@@ -123,12 +123,14 @@ What is verified, and what is not, as of the Mill removal:
 
 - **Verified** (issue #15 §5.1, §5.2): Mill does not claim the `.sc` files; Metals routes the shadow
   directory to a scala-cli build server on its own, behind an acceptance prompt.
+- **§5.4 — observed working.** Squiggles reach the cells, so Metals reports diagnostics against the
+  `.sc` itself rather than against scala-cli's generated wrapper under `.scala-build/`. This is one
+  manual session, not a recorded probe run: the Metals and scala-cli versions were not captured, and
+  the wrapper case has not been ruled out for every request type. The relay still refuses to guess a
+  line offset for a `.scala-build/` path and logs it at `debug` instead — set
+  `scalaNotebook.logLevel` to `debug` and read **Scala Notebook: Show Log** to check whether it ever
+  fires.
 - **Not yet verified** — these probes are open, and each one could change the design:
-  - **§5.4** Which file Metals reports diagnostics against. If it is scala-cli's generated wrapper
-    under `.scala-build/` rather than the `.sc` itself, **no squiggles reach the cells**: that copy
-    carries no marker naming the script it came from, so the relay cannot derive a line offset and
-    deliberately does not guess. It logs the URI at `debug` instead — set `scalaNotebook.logLevel`
-    to `debug` and read **Scala Notebook: Show Log** to see whether it fired.
   - **§5.5** Whether a second notebook's `.sc` is picked up without a restart, and whether the
     acceptance prompt reappears per file or only once per workspace.
   - **§5.6** Whether adding a `//> using dep` to a live shadow re-resolves without a restart, and
