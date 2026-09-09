@@ -2,18 +2,21 @@ import * as vscode from "vscode";
 import {
   CellLocationLink,
   cellPositionToShadow,
+  cellRangeToShadow,
   isAppendedColumn,
   PlainPosition,
   PlainRange,
   positionWithinSpan,
   selectionChainWithinSpan,
   rangeWithinSpan,
+  shadowEditsToCells,
   shadowLinkToCell,
   shadowRangeToCell,
   spanLineBounds,
 } from "./mapping";
 import { Logger } from "./log";
 import { looksLikeScalaCliGeneratedSource } from "./scalaCliBuild";
+import { tokensWithinLines } from "./semanticTokens";
 import { ExtensionConfig, ShadowManager, ShadowState } from "./shadowManager";
 import { CellSpan } from "./transform";
 
@@ -54,8 +57,15 @@ function rangeInCell(span: CellSpan, range: vscode.Range): vscode.Range | undefi
 
 /**
  * Completions may carry edits outside the cell - an auto-import Metals wants to put in the
- * shadow file's header. There is nowhere in the cell to apply those, so they collapse to an
- * empty edit at the top rather than landing on an unrelated line.
+ * shadow file's header. Collapsing the range to the start of the cell keeps the edit's text,
+ * so such an edit becomes an insertion at the top of the cell: the same re-homing
+ * `shadowEditsToCells` does deliberately for a quick fix, and right for the same reason - an
+ * import written in one cell is in scope for the cells after it.
+ *
+ * It is looser than that one in a way worth knowing: a *replacement* in the header also
+ * becomes an insertion here, so if Metals folded the new import into an existing group, the
+ * group's old text is copied into the cell rather than moved. Harmless - a duplicate import
+ * of the same name is legal - but not the same thing as applying the edit.
  */
 function completionRangeFromShadow(span: CellSpan, range: vscode.Range): vscode.Range {
   return rangeInCell(span, range) ?? new vscode.Range(0, 0, 0, 0);
@@ -73,24 +83,37 @@ export class LanguageFeatureRelay
     vscode.ReferenceProvider,
     vscode.InlayHintsProvider,
     vscode.CompletionItemProvider,
+    vscode.CodeActionProvider,
+    vscode.RenameProvider,
+    vscode.DocumentSymbolProvider,
+    vscode.FoldingRangeProvider,
+    vscode.DocumentSemanticTokensProvider,
     vscode.Disposable
 {
   private readonly inlayHintsChanged = new vscode.EventEmitter<void>();
+  private readonly semanticTokensChanged = new vscode.EventEmitter<void>();
   private readonly subscription: vscode.Disposable;
 
   readonly onDidChangeInlayHints = this.inlayHintsChanged.event;
+  readonly onDidChangeSemanticTokens = this.semanticTokensChanged.event;
 
   constructor(
     private readonly shadowManager: ShadowManager,
     private readonly log: Logger,
     private readonly getConfig: () => ExtensionConfig
   ) {
-    this.subscription = shadowManager.onDidChangeAnalysis(() => this.inlayHintsChanged.fire());
+    // Both of these are cached by VS Code rather than re-requested on demand, so they only
+    // catch up on a shadow rewrite or fresh diagnostics if we say so.
+    this.subscription = shadowManager.onDidChangeAnalysis(() => {
+      this.inlayHintsChanged.fire();
+      this.semanticTokensChanged.fire();
+    });
   }
 
   dispose(): void {
     this.subscription.dispose();
     this.inlayHintsChanged.dispose();
+    this.semanticTokensChanged.dispose();
   }
 
   /** The shadow state and span for a cell as they stand, without touching the shadow file. */
@@ -105,14 +128,19 @@ export class LanguageFeatureRelay
    * request is answered against what the user can actually see. Only for features the user
    * triggers deliberately - anything VS Code polls must not drive shadow writes.
    */
-  private async requestContext(document: vscode.TextDocument, position: vscode.Position): Promise<RequestContext | undefined> {
+  private async syncedCellContext(document: vscode.TextDocument): Promise<CellContext | undefined> {
     const state = this.shadowManager.getStateForCellUri(document.uri);
     if (!state) {
       return undefined;
     }
 
     await this.shadowManager.synchronizeForLanguageFeature(state.notebook);
-    const context = this.cellContext(document);
+    return this.cellContext(document);
+  }
+
+  /** `syncedCellContext` plus the request position translated into the shadow script. */
+  private async requestContext(document: vscode.TextDocument, position: vscode.Position): Promise<RequestContext | undefined> {
+    const context = await this.syncedCellContext(document);
     if (!context) {
       return undefined;
     }
@@ -622,5 +650,354 @@ export class LanguageFeatureRelay
     }
 
     return translated;
+  }
+
+  // ---------------------------------------------------------------- workspace edits
+
+  /** Whether a URI names code this extension or scala-cli generated, rather than a real source. */
+  private isGeneratedCode(uri: vscode.Uri): boolean {
+    return this.shadowManager.isShadowUri(uri) || looksLikeScalaCliGeneratedSource(uri.fsPath);
+  }
+
+  /**
+   * A `WorkspaceEdit` Metals expressed against shadow scripts, re-expressed against notebook
+   * cells. Undefined means at least one edit cannot be honestly re-homed, and the caller must
+   * abandon the whole operation - see `shadowEditsToCells` for why that is all-or-nothing.
+   *
+   * An edit touching no generated file is handed back *unchanged* rather than rebuilt. File
+   * creations, renames and deletions are not reachable through `WorkspaceEdit`'s public API -
+   * `entries()` reports text edits only - so rebuilding such an edit would silently drop them,
+   * which is how a "create class in a new file" quick fix would come to do nothing at all.
+   *
+   * `hoistTo` is passed on only for the requesting notebook's own shadow: it re-homes an
+   * insertion the shadow wanted to make outside every cell, and the only cell that can
+   * absorb one is the cell the user asked from.
+   */
+  private translateWorkspaceEdit(
+    requesting: ShadowState,
+    edit: vscode.WorkspaceEdit,
+    hoistTo?: CellSpan
+  ): vscode.WorkspaceEdit | undefined {
+    const entries = edit.entries();
+    if (!entries.some(([uri]) => this.isGeneratedCode(uri))) {
+      return edit;
+    }
+
+    const rebuilt = new vscode.WorkspaceEdit();
+    for (const [uri, edits] of entries) {
+      if (looksLikeScalaCliGeneratedSource(uri.fsPath)) {
+        // scala-cli's wrapper for some script. Nothing in it corresponds to a cell, and it
+        // is rewritten on every build, so an edit there is both unmappable and pointless.
+        return undefined;
+      }
+
+      const state = this.shadowManager.getStateForShadowUri(uri);
+      if (!state) {
+        rebuilt.set(uri, edits);
+        continue;
+      }
+
+      const translation = shadowEditsToCells(
+        state.mapping,
+        edits.map((textEdit) => ({ range: plainRange(textEdit.range), newText: textEdit.newText })),
+        state.shadowUri.toString() === requesting.shadowUri.toString() ? hoistTo : undefined
+      );
+      if (!translation) {
+        return undefined;
+      }
+      for (const cell of translation.cells) {
+        rebuilt.set(
+          cell.cellUri,
+          cell.edits.map((cellEdit) => vscode.TextEdit.replace(vscodeRange(cellEdit.range), cellEdit.newText))
+        );
+      }
+    }
+    return rebuilt;
+  }
+
+  // ---------------------------------------------------------------- code actions
+
+  async provideCodeActions(
+    document: vscode.TextDocument,
+    range: vscode.Range | vscode.Selection,
+    codeActionContext: vscode.CodeActionContext,
+    token: vscode.CancellationToken
+  ): Promise<vscode.CodeAction[] | undefined> {
+    // VS Code asks for code actions every time the caret moves, to decide whether to show
+    // the lightbulb. Letting that drive a shadow write would defeat the regeneration
+    // debounce, so only a deliberate invocation - the lightbulb opened, or Cmd-. - flushes
+    // pending edits first.
+    const context =
+      codeActionContext.triggerKind === vscode.CodeActionTriggerKind.Invoke
+        ? await this.syncedCellContext(document)
+        : this.cellContext(document);
+    if (!context || token.isCancellationRequested) {
+      return undefined;
+    }
+
+    // `codeActionContext.diagnostics` holds the *cell* diagnostics this extension published,
+    // and is deliberately unused: the command below has VS Code build a fresh context from
+    // the markers on the shadow URI, which are Metals' own, in the coordinates Metals
+    // reported them in. So the diagnostics a quick fix keys off need no back-translation.
+    const results = await vscode.commands.executeCommand<(vscode.CodeAction | vscode.Command)[]>(
+      "vscode.executeCodeActionProvider",
+      context.state.shadowUri,
+      vscodeRange(cellRangeToShadow(context.span, plainRange(range))),
+      codeActionContext.only?.value,
+      Math.max(this.getConfig().codeActionResolveCount, 0)
+    );
+    if (!results || token.isCancellationRequested) {
+      return undefined;
+    }
+
+    const translated: vscode.CodeAction[] = [];
+    for (const result of results) {
+      const action = this.translateCodeAction(context, result);
+      if (action) {
+        translated.push(action);
+      }
+    }
+    this.log.debug(
+      () =>
+        `codeActions: ${results.length} from Metals, ${translated.length} offered to cell ${context.span.cellIndex}`
+    );
+    return translated;
+  }
+
+  /**
+   * Turn one of Metals' code actions into one that acts on the cell, or drop it.
+   *
+   * Only edit-carrying actions survive. An action backed by a *command* is computed
+   * server-side from arguments naming the shadow file and shadow positions: there is nothing
+   * to translate those into, and if it did run, its edit would land in the shadow script,
+   * which the next regenerate discards. Dropping it costs a menu entry; keeping it would
+   * offer a fix that silently does nothing.
+   */
+  private translateCodeAction(
+    context: CellContext,
+    result: vscode.CodeAction | vscode.Command
+  ): vscode.CodeAction | undefined {
+    if (typeof (result as vscode.Command).command === "string") {
+      // A bare Command rather than a CodeAction - `executeCodeActionProvider` returns those
+      // for actions VS Code synthesized. Whatever it does, it does to the shadow script.
+      this.log.debug(() => `codeActions: dropped bare command "${result.title}"`);
+      return undefined;
+    }
+
+    const action = result as vscode.CodeAction;
+    if (action.command) {
+      this.log.debug(() => `codeActions: dropped command-backed "${action.title}"`);
+      return undefined;
+    }
+    if (!action.edit) {
+      // `diagnostics` and `disabled` do not survive the command bridge, so an action with
+      // neither an edit nor a command has nothing left it could do here.
+      return undefined;
+    }
+
+    const edit = this.translateWorkspaceEdit(context.state, action.edit, context.span);
+    if (!edit) {
+      this.log.debug(() => `codeActions: dropped "${action.title}"; its edits do not fit the cell`);
+      return undefined;
+    }
+
+    const translated = new vscode.CodeAction(action.title, action.kind);
+    translated.edit = edit;
+    translated.isPreferred = action.isPreferred;
+    return translated;
+  }
+
+  // ---------------------------------------------------------------- rename
+
+  async prepareRename(
+    document: vscode.TextDocument,
+    position: vscode.Position,
+    token: vscode.CancellationToken
+  ): Promise<{ range: vscode.Range; placeholder: string } | undefined> {
+    const context = await this.requestContext(document, position);
+    if (!context || token.isCancellationRequested) {
+      return undefined;
+    }
+
+    const prepared = await vscode.commands.executeCommand<{ range: vscode.Range; placeholder: string } | undefined>(
+      "vscode.prepareRename",
+      context.state.shadowUri,
+      context.shadowPosition
+    );
+    if (!prepared || token.isCancellationRequested) {
+      return undefined;
+    }
+
+    const range = rangeInCell(context.span, prepared.range);
+    if (!range) {
+      // Metals is offering to rename something the cell cannot show: a synthesized `resN_M`
+      // binding, or a name the prelude declares. Refusing now beats opening the rename box
+      // and failing once the user has typed a new name.
+      throw new Error("That name is generated by the shadow script, so it cannot be renamed from a cell.");
+    }
+    return { range, placeholder: prepared.placeholder };
+  }
+
+  async provideRenameEdits(
+    document: vscode.TextDocument,
+    position: vscode.Position,
+    newName: string,
+    token: vscode.CancellationToken
+  ): Promise<vscode.WorkspaceEdit | undefined> {
+    const context = await this.requestContext(document, position);
+    if (!context || token.isCancellationRequested) {
+      return undefined;
+    }
+
+    const edit = await vscode.commands.executeCommand<vscode.WorkspaceEdit | undefined>(
+      "vscode.executeDocumentRenameProvider",
+      context.state.shadowUri,
+      context.shadowPosition,
+      newName
+    );
+    if (!edit || token.isCancellationRequested) {
+      return undefined;
+    }
+
+    // No `hoistTo` here. A rename is one atomic edit over every occurrence of a name, so an
+    // occurrence that cannot be placed in a cell has to fail the whole rename: re-homing it
+    // would move code the user never wrote, and skipping it would leave the notebook half
+    // renamed and no longer compiling.
+    const translated = this.translateWorkspaceEdit(context.state, edit);
+    if (!translated) {
+      throw new Error(
+        `Cannot rename to "${newName}" from a cell: some occurrences are in code the shadow script generates.`
+      );
+    }
+    this.log.debug(
+      () => `rename: ${edit.entries().length} file(s) from Metals, ${translated.entries().length} after mapping`
+    );
+    return translated;
+  }
+
+  // ---------------------------------------------------------------- document symbols
+
+  async provideDocumentSymbols(
+    document: vscode.TextDocument,
+    token: vscode.CancellationToken
+  ): Promise<vscode.DocumentSymbol[] | undefined> {
+    // The outline and breadcrumbs are refreshed on every document change, so this is another
+    // feature that must follow the shadow rather than drive it.
+    const context = this.cellContext(document);
+    if (!context || token.isCancellationRequested) {
+      return undefined;
+    }
+
+    const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
+      "vscode.executeDocumentSymbolProvider",
+      context.state.shadowUri
+    );
+    if (!symbols || token.isCancellationRequested) {
+      return undefined;
+    }
+
+    const translated = this.symbolsWithinSpan(context.span, symbols);
+    this.log.debug(
+      () => `documentSymbols: ${translated.length} top-level symbol(s) for cell ${context.span.cellIndex}`
+    );
+    return translated;
+  }
+
+  /**
+   * The symbols one cell owns, lifted out of the shadow script's outline.
+   *
+   * The tree is descended rather than filtered. A shadow script's outline is a single
+   * `object` containing every cell, with a further nested object per redefinition, so
+   * filtering the top level would keep nothing. A symbol that fits the cell is kept with its
+   * children; one that does not is discarded but still searched, which strips the wrapper
+   * and the redefinition scopes without losing what they hold.
+   */
+  private symbolsWithinSpan(
+    span: CellSpan,
+    symbols: readonly vscode.DocumentSymbol[]
+  ): vscode.DocumentSymbol[] {
+    const kept: vscode.DocumentSymbol[] = [];
+    for (const symbol of symbols) {
+      const children = this.symbolsWithinSpan(span, symbol.children ?? []);
+      const range = rangeInCell(span, symbol.range);
+      const selectionRange = range ? rangeInCell(span, symbol.selectionRange) : undefined;
+      // DocumentSymbol's constructor rejects an empty name, and a nameless symbol would be
+      // an unclickable blank row in the outline anyway.
+      if (!range || !selectionRange || symbol.name.length === 0) {
+        kept.push(...children);
+        continue;
+      }
+
+      const translated = new vscode.DocumentSymbol(
+        symbol.name,
+        symbol.detail ?? "",
+        symbol.kind,
+        range,
+        selectionRange
+      );
+      translated.children = children;
+      kept.push(translated);
+    }
+    return kept;
+  }
+
+  // ---------------------------------------------------------------- folding ranges
+
+  async provideFoldingRanges(
+    document: vscode.TextDocument,
+    _foldingContext: vscode.FoldingContext,
+    token: vscode.CancellationToken
+  ): Promise<vscode.FoldingRange[] | undefined> {
+    const context = this.cellContext(document);
+    if (!context || token.isCancellationRequested) {
+      return undefined;
+    }
+
+    const ranges = await vscode.commands.executeCommand<vscode.FoldingRange[]>(
+      "vscode.executeFoldingRangeProvider",
+      context.state.shadowUri
+    );
+    if (!ranges || token.isCancellationRequested) {
+      return undefined;
+    }
+
+    // A fold reaching past the cell is the wrapper object or a redefinition scope; folding
+    // one from inside a cell would hide lines the cell does not contain.
+    const { firstLine, lastLine } = spanLineBounds(context.span);
+    const translated: vscode.FoldingRange[] = [];
+    for (const range of ranges) {
+      if (range.start < firstLine || range.end > lastLine) {
+        continue;
+      }
+      translated.push(new vscode.FoldingRange(range.start - firstLine, range.end - firstLine, range.kind));
+    }
+    return translated;
+  }
+
+  // ---------------------------------------------------------------- semantic tokens
+
+  async provideDocumentSemanticTokens(
+    document: vscode.TextDocument,
+    token: vscode.CancellationToken
+  ): Promise<vscode.SemanticTokens | undefined> {
+    // Requested per visible document and cached until onDidChangeSemanticTokens fires, so
+    // like inlay hints this follows the shadow instead of synchronizing it.
+    const context = this.cellContext(document);
+    if (!context || token.isCancellationRequested) {
+      return undefined;
+    }
+
+    const tokens = await vscode.commands.executeCommand<vscode.SemanticTokens | undefined>(
+      "vscode.provideDocumentSemanticTokens",
+      context.state.shadowUri
+    );
+    if (!tokens || token.isCancellationRequested) {
+      return undefined;
+    }
+
+    const { firstLine, lastLine } = spanLineBounds(context.span);
+    const data = tokensWithinLines(tokens.data, firstLine, lastLine);
+    this.log.trace(() => `semanticTokens: ${data.length / 5} token(s) for cell ${context.span.cellIndex}`);
+    return new vscode.SemanticTokens(data);
   }
 }

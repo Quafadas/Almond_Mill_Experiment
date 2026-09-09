@@ -88,8 +88,55 @@
       names, the wrapper/nesting objects in an owner path).
 - [ ] Translate inlay-hint label links that point into the shadow script back to the defining
       cell, rather than stripping them.
-- [ ] Consider code actions (Metals' "import missing symbol"): needs cell diagnostics
-      translated back into shadow coordinates for the request, plus `WorkspaceEdit` translation.
+- [x] Forward code actions (Metals' quick fixes and refactors), translating the `WorkspaceEdit`
+      each one carries back into cell edits. The diagnostics a quick fix keys off need **no**
+      back-translation, contrary to the note this entry used to carry:
+      `vscode.executeCodeActionProvider` has VS Code build the request context from the markers
+      on the shadow URI, which are still Metals' own - the relay publishes cell diagnostics into
+      a *separate* collection and never clears Metals'.
+- [x] Re-home a quick fix's out-of-cell *insertion* to the top of the requesting cell, which is
+      what makes "import missing symbol" work: Metals puts the import in the prelude, outside
+      every span. Faithful to the notebook, where an import in one cell is in scope for the
+      cells after it. Only insertions are re-homed - a replacement outside every cell (Metals
+      organizing the whole script's imports) would move the prelude into the user's cell, so it
+      rejects and the action is not offered.
+- [x] Drop a code action backed by a server-side `command` rather than an edit. Its arguments
+      name the shadow file and shadow positions, and if it ran, its edit would land in the
+      shadow - which the next regenerate discards.
+- [x] Hand back an edit that touches no generated file *unchanged* rather than rebuilt: file
+      creations, renames and deletions are not reachable through `WorkspaceEdit.entries()`, so
+      rebuilding one would silently drop them and leave "create class in a new file" doing
+      nothing.
+- [x] Forward rename, with the same edit translation but no re-homing: a rename is atomic over
+      every occurrence, so an occurrence that cannot be placed in a cell fails the whole rename
+      with a message rather than being skipped. `prepareRename` refuses up front when Metals
+      offers to rename generated code.
+- [x] Forward document symbols, descending the shadow's outline rather than filtering it: a
+      symbol that fits the cell is kept with its children, one that does not is discarded but
+      still searched, which strips the wrapper object and the redefinition scopes without losing
+      what they contain.
+- [x] Forward folding ranges, dropping any fold that reaches past the cell (the wrapper object
+      and the redefinition scopes).
+- [x] Forward semantic tokens, so cells get Metals' own Scala highlighting instead of TextMate
+      guesswork. Registered lazily: the provider needs the *server's* token legend, and the
+      legend can only be asked for against a file Metals has loaded, so registration retries on
+      each analysis change until it succeeds. Unlike the inlay-hint settings this needs no
+      configuration - `metals.enableSemanticHighlighting` defaults to true.
+- [x] Answer code actions and semantic tokens without driving shadow writes. VS Code asks for
+      code actions on every caret move to decide whether to show the lightbulb, so only a
+      deliberate invocation (`CodeActionTriggerKind.Invoke`) synchronizes first; semantic tokens
+      and document symbols follow the shadow like inlay hints do.
+- [ ] Put the completion path's out-of-cell edits through `shadowEditsToCells` too. It re-homes
+      them by collapsing the range to the cell's start, which keeps the text and so does the
+      right thing for an insertion, but silently turns a header *replacement* into an insertion
+      as well - copying the replaced text into the cell rather than moving it.
+- [ ] Recover the code actions that are dropped rather than translated: the command-backed ones
+      (a Metals server command against the shadow), and "organize imports", whose edits rewrite
+      the prelude. Both would need the emitter's cooperation, not more mapping.
+- [ ] Formatting (scalafmt through Metals) waits on §5.7. While cell bodies sit inside the
+      wrapper object, scalafmt wants to indent every one of them, so formatting a cell would
+      return a +2-space edit on every line. Dropping the wrapper makes the feature nearly free,
+      which is worth more than §5.7 looks like on its own.
 - [ ] Resolve `import $file` against sibling scripts instead of neutralizing it.
 - [ ] research if there is a way to customise almond's classpath directly... if there is then maybe
       we could also put the project's own sources on the shadow's classpath (`//> using file`).
@@ -119,6 +166,12 @@
 - [x] Golden-test the shadow the fixture notebook produces, whole.
 - [x] Unit-test that scala-cli's `.scala-build/` wrappers are recognised, so generated code is
       never offered as a reference or an inlay-hint link.
+- [x] Unit-test shadow-to-cell edit translation: in-cell edits, grouping by cell, an edit
+      crossing a cell boundary, an out-of-cell insertion with and without somewhere to re-home
+      it, and the refusal to re-home a replacement.
+- [x] Unit-test semantic-token re-encoding: delta decoding, the encode/decode round trip,
+      defensive ordering, filtering to a cell's lines, and that a column delta is rebuilt after
+      an earlier token on the same line is dropped.
 - [ ] Unit-test reference filtering (other notebooks' shadows, synthesized lines,
       de-duplication) - needs the VS Code runtime, so it waits on Extension Host tests.
 - [ ] Extract completion-result translation into pure, unit-testable functions.
@@ -149,6 +202,20 @@
 - [ ] Verify the completion documentation pane is populated, and that an auto-import
       completion still inserts its import.
 - [ ] Verify Shift-Alt-Right expands by syntax within a cell and stops at the cell edge.
+- [ ] Verify a quick fix on an unresolved name inserts its import at the top of the cell, and
+      that the import is still there after the shadow regenerates.
+- [ ] Verify "organize imports" is absent from the Source Action menu, rather than present and
+      inert.
+- [ ] Verify renaming a `val` used across several cells rewrites every cell in one undo step,
+      and that renaming a `resN_M` binding or a prelude name is refused with a message.
+- [ ] Verify the cell outline (Cmd-Shift-O) lists the cell's own definitions and neither the
+      wrapper object nor the other cells'.
+- [ ] Verify cells get semantic highlighting, and check the log for the line naming the token
+      count. Metals registers its own semantic-tokens provider for `scala`; VS Code picks one
+      provider rather than merging, so confirm ours is the one asked - if Metals' wins, the
+      cells fall back to TextMate colours and this feature is a no-op.
+- [ ] Verify expanding/collapsing a fold inside a cell never hides lines the cell does not
+      contain.
 - [ ] Run issue #15's open probes against `fixture/`, which now has no build file at all:
       capture Metals' acceptance prompt verbatim, note whether it reappears per shadow file,
       and record at `debug` which URI diagnostics actually arrive on (§5.4).
