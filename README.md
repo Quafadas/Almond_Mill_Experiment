@@ -4,8 +4,19 @@
 
 Implements [Concept #1](https://github.com/Quafadas/Almond_Mill_Experiment/issues/1): show Metals
 compile diagnostics as squiggles inside the cells of a `.ipynb` notebook in VS Code, without
-modifying Metals or Mill, by concatenating a notebook's Scala cells into a hidden Mill "shadow"
+modifying Metals or scala-cli, by concatenating a notebook's Scala cells into a hidden "shadow"
 script and remapping the diagnostics VS Code reports for that file back onto the cell URIs.
+
+The shadow is a **scala-cli script** — `notebook-shadow/<name>.sc`, with `//> using` directives for
+the Scala version and dependencies. Metals starts a scala-cli build server for a directory of `.sc`
+files on its own, so **no build file of any kind is required** in the workspace.
+
+> **Note.** This targeted Mill until [issue #15](https://github.com/Quafadas/Almond_Mill_Experiment/issues/15).
+> Under Mill one shadow script was one build target, which meant a `Metals: Import Build` for every
+> new notebook and a reimport-plus-clean for every `import $ivy`. Neither was a property of the
+> shadow-file approach — both were properties of Mill script-module discovery — and both go away
+> when the shadow is a `.sc` that scala-cli resolves for itself. The Mill target has been removed;
+> see [Status](#status) for what that leaves unverified.
 
 ## Try it yourself
 
@@ -19,7 +30,7 @@ Linux filesystem (e.g. `~/...`), not under `/mnt/c`.
    cd Almond_Mill_Experiment/scala-notebook-shadow
    npm install
    npm run compile
-   npm test        # optional: confirms the 16 unit tests pass, no VS Code needed for this step
+   npm test        # optional: runs the unit tests, no VS Code needed for this step
    ```
 
 2. **Open the extension project in VS Code, connected to WSL.**
@@ -34,69 +45,99 @@ Linux filesystem (e.g. `~/...`), not under `/mnt/c`.
    do all remaining steps in *that* window.
 
 4. **Open the fixture workspace** in the Extension Development Host: File ▸ Open Folder ▸ pick this
-   repo's `fixture/` directory.
+   repo's `fixture/` directory. It holds a notebook and nothing else — no build file.
 
 5. **Install Metals** in that window if it isn't already there (Extensions ▸ search
-   `scalameta.metals` ▸ Install). It should auto-detect `build.mill.yaml` and offer to use Mill as
-   the build server.
+   `scalameta.metals` ▸ Install).
 
-6. **Import the build.** Open Command Palette (`Ctrl+Shift+P`) ▸ **Metals: Import Build**, and wait
-   for it to finish (watch the Metals item in the status bar). This step is required — see the
-   Phase 0 findings below for why.
-
-7. **Open `fixture/sample.ipynb`.** If VS Code prompts for a kernel, you can dismiss it — no kernel
+6. **Open `fixture/sample.ipynb`.** If VS Code prompts for a kernel, you can dismiss it — no kernel
    needs to be installed or selected for diagnostics to work.
 
-8. **Inspect the shadow file.** Command Palette ▸ **Scala Notebook: Open Shadow File** to see the
-   generated `notebook-shadow/sample.scala`, or just look at it directly in the file explorer.
+   Metals will notice the generated `notebook-shadow/sample.sc` and **prompt to import it** as a
+   scala-cli script. Accept. The routing to scala-cli is automatic; the acceptance is not.
 
-9. **Exercise the acceptance checklist** (see below): edit cell 2 to introduce/fix a type error,
+7. **Inspect the shadow file.** Command Palette ▸ **Scala Notebook: Open Shadow File** to see the
+   generated `notebook-shadow/sample.sc`, or just look at it directly in the file explorer.
+
+8. **Exercise the acceptance checklist** (see below): edit cell 2 to introduce/fix a type error,
    watch the squiggle move with it; add a markdown cell and confirm nothing shifts incorrectly;
    close and reopen the notebook and confirm squiggles come back without duplicating the shadow
    file.
 
-If squiggles don't show up after adding a dependency via `import $ivy` or after any other edit to
-the shadow file's `//|` header, re-run **Metals: Import Build** — and if that alone doesn't clear
-it, a full clean of the module was needed during Phase 0 testing too (see findings below). This is
-a known Metals/Mill limitation, not a bug in the extension.
+**Trying it against your own notebook instead of the fixture:** open any workspace, add/open a
+`.ipynb` file with Scala code cells in it, and the extension activates automatically
+(`onNotebook:jupyter-notebook`) — no fixture-specific wiring, and no build file needed. Adjust
+`scalaNotebook.*` settings (see below) to match your project's Scala version and dependencies.
 
-**Trying it against your own notebook instead of the fixture:** open any workspace that has a
-`build.mill` or `build.mill.yaml` at its root, add/open a `.ipynb` file with Scala code cells in it,
-and the extension activates automatically (`onNotebook:jupyter-notebook`) — no fixture-specific
-wiring involved. Adjust `scalaNotebook.*` settings (see below) to match your project's Scala
-version and dependencies.
+**Upgrading from the Mill version?** It wrote `notebook-shadow/<name>.scala`; this writes
+`<name>.sc` beside it, wrapped in an object of the same name. Both would compile and every cell
+would squiggle with a duplicate definition, so **delete the old `.scala` shadow**. The extension
+logs a warning naming the file rather than deleting it for you.
 
 This repo has two parts:
 
 - [`scala-notebook-shadow/`](scala-notebook-shadow/) — the VS Code extension.
-- [`fixture/`](fixture/) — a throwaway Mill + notebook workspace used for Phase 0 probing and for
-  manually running the acceptance checklist below.
+- [`fixture/`](fixture/) — a throwaway notebook workspace used for probing and for manually
+  running the acceptance checklist below.
 
-## Phase 0 findings
+## Why the shadow is a scala-cli script
 
-Phase 0 (issue §3) was done by hand, in VS Code against WSL2 + Mill + Metals, before any code was
-written. Answers, as recorded on the issue:
+Phase 0 (issue §3) probed the Mill target by hand, before any code was written. Its findings are
+what eventually removed Mill:
 
 | Question | Finding |
 |---|---|
-| Does Metals report the error without any extra step? | **No.** Running `Metals: Import Build` is necessary before diagnostics for a freshly created script appear. |
-| Does the script need to be run once via `./mill <path>:compile` before Metals reports diagnostics? | **No**, once the build has been imported, diagnostics are reported without ever running the compile task. |
-| Does a directory name starting with `.` (e.g. `.notebook-shadow/`) still get picked up? | **No.** The dot-prefixed directory made the source file invisible to Mill — it was not compiled. The extension therefore defaults `shadowDir` to the non-hidden `notebook-shadow/`. |
-| Is a newly-added script file (e.g. a second notebook's shadow file) picked up automatically? | **No.** A reimport (`Metals: Import Build`) is needed for Metals/Mill to notice a new script file. |
-| Does changing the `//|` header (e.g. adding an `mvnDeps` entry) just need a reimport? | **No — it needs a "clean" of the module.** A plain reimport was observed to be insufficient after editing header directives; the module had to be cleaned as well. |
-| Which file does Metals report diagnostics against? | **Mill's generated copy**, not the shadow file — e.g. `.bsp/out/notebook-shadow/sample.scala/allSourceFiles.dest/sample.scala`. Mill compiles a copy with two marker lines prepended, so the relay resolves that path back to the shadow file and subtracts the offset (`generatedSource.ts`). Without this the relay saw no diagnostics at all and no squiggles reached the cells. |
-| Which `source` does Metals put on the diagnostics (PC vs BSP)? | **Not conclusively determined during Phase 0** — left as an open question; see "Known limitations" below. |
+| Does Metals report the error without any extra step? | **No.** `Metals: Import Build` was necessary before diagnostics for a freshly created script appeared. |
+| Is a newly-added script file (a second notebook's shadow) picked up automatically? | **No.** A reimport was needed for Metals/Mill to notice it. |
+| Does changing the `//\|` header (adding an `mvnDeps` entry) just need a reimport? | **No — it needed a "clean" of the module** as well. |
+| Which file does Metals report diagnostics against? | **Mill's generated copy**, not the shadow — e.g. `.bsp/out/notebook-shadow/sample.scala/allSourceFiles.dest/sample.scala`. Mill compiled a copy with two marker lines prepended, so the relay had to resolve that path back and subtract the offset. |
+| Does a directory name starting with `.` still get picked up? | **No.** A dot-prefixed directory made the source invisible to Mill. `shadowDir` therefore defaults to the non-hidden `notebook-shadow/`. |
 
-These findings directly shaped the design:
+Every cost in that table traces to one fact: **one Mill script is one build target.** A new notebook
+is a new target, so it is a build-structure change; an `import $ivy` changes the header, so it is
+another one. None of that is a property of the shadow-file approach.
 
-- The extension does **not** try to fully automate reimports or module cleans — per issue §8
-  acceptance criterion 6, where a reimport is needed the POC documents the manual step
-  (`Metals: Import Build`, and occasionally a clean) rather than scripting it, since driving Metals'
-  own commands reliably from another extension was explicitly out of scope.
-- `scalaNotebook.compileOnCreate` (default `false`) exists per issue §5 step 1b but, per the Phase 0
-  finding above, is not required for diagnostics to appear once a build is imported — it is provided
-  as an escape hatch, not a requirement.
-- `shadowDir` defaults to `notebook-shadow` (no leading dot).
+[Issue #15](https://github.com/Quafadas/Almond_Mill_Experiment/issues/15) probed the alternative and
+confirmed the two facts the switch rests on:
+
+| Probe | Finding |
+|---|---|
+| Does Mill claim `notebook-shadow/*.sc` files? | **No.** Mill's script discovery does not pick up `.sc` files in a subdirectory of its own accord, so there is no contention if the workspace happens to be a Mill project. |
+| Does Metals route the directory to scala-cli? | **Yes, automatically** — the existing dedicated-folder heuristic fires with no nudge from the extension. It is not silent, though: the script import has to be accepted at a prompt. |
+
+So a new notebook becomes a new *source* in one directory-level target rather than a new target, and
+scala-cli resolves `//> using dep` itself. The Mill target, its `//\|` header, its build-root
+discovery, its `./mill <path>:compile` escape hatch and the `.dest/`-copy relay were all removed
+rather than kept behind a switch.
+
+Two design decisions survive the change unaltered:
+
+- The extension does **not** drive Metals' own commands. Where an interaction is needed — accepting
+  the scala-cli import prompt — it is documented, not scripted.
+- `shadowDir` defaults to `notebook-shadow` (no leading dot). Whether scala-cli also skips
+  dot-prefixed directories is untested; the default sidesteps the question.
+
+## Status
+
+What is verified, and what is not, as of the Mill removal:
+
+- **Verified** (issue #15 §5.1, §5.2): Mill does not claim the `.sc` files; Metals routes the shadow
+  directory to a scala-cli build server on its own, behind an acceptance prompt.
+- **§5.4 — observed working.** Squiggles reach the cells, so Metals reports diagnostics against the
+  `.sc` itself rather than against scala-cli's generated wrapper under `.scala-build/`. This is one
+  manual session, not a recorded probe run: the Metals and scala-cli versions were not captured, and
+  the wrapper case has not been ruled out for every request type. The relay still refuses to guess a
+  line offset for a `.scala-build/` path and logs it at `debug` instead — set
+  `scalaNotebook.logLevel` to `debug` and read **Scala Notebook: Show Log** to check whether it ever
+  fires.
+- **Not yet verified** — these probes are open, and each one could change the design:
+  - **§5.5** Whether a second notebook's `.sc` is picked up without a restart, and whether the
+    acceptance prompt reappears per file or only once per workspace.
+  - **§5.6** Whether adding a `//> using dep` to a live shadow re-resolves without a restart, and
+    whether a bad coordinate recovers. This is the direct replacement for Mill's reimport-plus-clean,
+    and the highest-risk probe left.
+  - **§5.7** Whether the wrapper object and the `-Wconf` are still needed at all in a `.sc`, where
+    top-level statements are already legal.
 
 ## How to run
 
@@ -112,12 +153,12 @@ npm run typecheck # tsc --noEmit
 ```
 
 Then press F5 in VS Code (with `scala-notebook-shadow/` open as the workspace) to launch an
-Extension Development Host. Open the `fixture/` folder in that host window, let Metals import the
-build, then open `fixture/sample.ipynb`.
+Extension Development Host. Open the `fixture/` folder in that host window, then open
+`fixture/sample.ipynb` and accept Metals' prompt to import the generated script.
 
 Useful commands (Command Palette):
 
-- **Scala Notebook: Open Shadow File** — reveals the shadow `.scala` file for the active notebook.
+- **Scala Notebook: Open Shadow File** — reveals the shadow `.sc` file for the active notebook.
 - **Scala Notebook: Regenerate Shadow File** — forces regeneration + save, bypassing the
   unchanged-text short-circuit.
 
@@ -138,25 +179,23 @@ to a GitHub Release (marked pre-release) with generated notes. The tag must matc
 `package.json` or the packaging step fails, and — because GitHub reads workflow files from the ref
 being built — the tagged commit must itself contain `.github/workflows/ci.yml`.
 
-Nothing in CI runs Metals or Mill: the fixture build needs a JDK, a Metals import and generated
-shadow scripts, so everything it would cover stays on the manual-verification checklist below.
+Nothing in CI runs Metals or scala-cli: that needs a JDK, a Metals session and generated shadow
+scripts, so everything it would cover stays on the manual-verification checklist below.
 Dependency updates come in via `.github/dependabot.yml` (npm + GitHub Actions, weekly).
 
 ## Shadow file layout
 
-Every notebook becomes one Mill script. Cell bodies are copied in verbatim — never re-indented —
-one line per source line, so a cell's line *N* is always the shadow's line `span.startLine + N`:
+Every notebook becomes one scala-cli script. Cell bodies are copied in verbatim — never
+re-indented — one line per source line, so a cell's line *N* is always the shadow's line
+`span.startLine + N`:
 
 ```scala
-//| scalaVersion: 3.7.2
-//| repositories:                                  # JitPack for the prelude, plus `import $repo`
-//| - https://jitpack.io
-//| mvnDeps:                                       # prelude + config `mvnDeps` + `$ivy`/`$dep`
-//| - com.lihaoyi:ammonite-repl-api_3.3.7:3.0.8
-//| - sh.almond::jupyter-api:0.14.5
-//| - com.lihaoyi::os-lib:0.11.3
-//| scalacOptions:
-//| - -Wconf:msg=A pure expression does nothing in statement position:s
+//> using scala 3.7.2
+//> using repository https://jitpack.io            # JitPack for the prelude, plus `import $repo`
+//> using dep com.lihaoyi:ammonite-repl-api_3.3.7:3.0.8   # prelude + config `mvnDeps` + `$ivy`
+//> using dep sh.almond::jupyter-api:0.14.5
+//> using dep com.lihaoyi::os-lib:0.11.3
+//> using option "-Wconf:msg=A pure expression does nothing in statement position:s"  # quoted: the value has spaces
 object sample {                                    # named after the shadow file
 <prelude imports, then config `preamble` lines>
 /* --- cell 0 W0sZmlsZQ== */
@@ -169,14 +208,16 @@ println(res1_2))
 }
 ```
 
-**Why the wrapper.** Scala 3 rejects statements at the top level of a `.scala` file (*"Illegal start
-of toplevel definition"*), and Mill splices a script's body in at exactly that position — so
-`println("hi")` in a cell was a hard error. Almond sidesteps this by wrapping each cell in an
-object, where a bare statement is just part of the template body. We wrap for the same reason, but
-share one object across cells rather than opening one per cell: Ammonite can afford per-cell objects
-only because it computes an exact import list for each one, and the naive `import cell0.*` version
-makes any name defined in two cells ambiguous. One shared object keeps cross-cell references
-resolving with no import bookkeeping at all.
+**Why the wrapper.** Almond wraps each cell in an object, where a bare statement is just part of
+the template body. We wrap for the same reason, but share one object across cells rather than
+opening one per cell: Ammonite can afford per-cell objects only because it computes an exact import
+list for each one, and the naive `import cell0.*` version makes any name defined in two cells
+ambiguous. One shared object keeps cross-cell references resolving with no import bookkeeping at
+all. It is also what the redefinition nesting below nests into, and what keeps two notebooks'
+shadows in one directory from colliding.
+
+A `.sc` script does allow top-level statements, so the wrapper is no longer load-bearing for that
+alone — whether it can go is issue #15 §5.7, unanswered.
 
 **Redefinition (nested scopes).** A shared object does mean that redefining a name — `val n = 2` in
 one cell, `val n = 3` in a later one — is a duplicate member, where Almond would simply shadow the
@@ -241,7 +282,7 @@ commented out in place (`// [shadow] ...`), preserving line numbering. `$ivy`/`$
 comma-separated, or braced) become `mvnDeps` entries and `$repo` becomes a `repositories` entry;
 `$file`, `$plugin`, `$scalac` and `$profile` have no shadow-file equivalent and are only
 neutralized. A coordinate using Almond's `_` version placeholder (`sh.almond::scala-kernel-api:_`)
-is dropped rather than written to the header, where Mill couldn't resolve it and the failure would
+is dropped rather than written to the header, where scala-cli couldn't resolve it and the failure would
 bury every real diagnostic.
 
 **The prelude.** A notebook cell can write `Markdown("# Hello World")`, `publish.stdout(...)` or
@@ -285,14 +326,17 @@ kernel too, since Ammonite puts its own classpath in scope there.
 
 | Setting | Type | Default | Notes |
 |---|---|---|---|
-| `scalaNotebook.scalaVersion` | string | `"3.7.2"` | Written into `//| scalaVersion`. Must match the kernel you run, otherwise phantom errors. |
-| `scalaNotebook.mvnDeps` | string[] | `[]` | Mill coordinates, e.g. `com.lihaoyi::upickle:4.0.2`. Merged with `$ivy`/`$dep` lines found in cells. |
+| `scalaNotebook.scalaVersion` | string | `"3.7.2"` | Written into `//> using scala`. Must match the kernel you run, otherwise phantom errors. |
+| `scalaNotebook.mvnDeps` | string[] | `[]` | Dependency coordinates, e.g. `com.lihaoyi::upickle:4.0.2`, one `//> using dep` each. Merged with `$ivy`/`$dep` lines found in cells. |
 | `scalaNotebook.ammoniteVersion` | string | `"3.0.8"` | Ammonite version behind the kernel, whose `repl`/`interp` bridges go in scope. Should match the Ammonite your Almond version embeds. Empty string leaves them out. |
 | `scalaNotebook.almondVersion` | string | `"0.14.5"` | Almond version whose predef the shadow file reproduces. Empty string leaves it out. |
 | `scalaNotebook.preamble` | string[] | `[]` | Extra lines inserted inside the wrapper object, after the Almond prelude and before the first cell. Behaves like a predef cell, so statements are allowed. |
-| `scalaNotebook.shadowDir` | string | `"notebook-shadow"` | Relative to the Mill build the notebook belongs to (nearest `build.mill`, `build.mill.yaml`, `build.mill.scala` or `.mill-version` at or above it), else the workspace folder root. |
+| `scalaNotebook.shadowDir` | string | `"notebook-shadow"` | Relative to the first workspace folder. Metals starts a scala-cli build server for it on its own; no build file is needed. |
 | `scalaNotebook.debounceMs` | number | `400` | Debounce between a notebook edit and shadow regeneration. |
-| `scalaNotebook.compileOnCreate` | boolean | `false` | Runs `./mill <shadowPath>:compile` once when a shadow file is first created. See Phase 0 findings — not required in practice, kept as an escape hatch. |
+| `scalaNotebook.completionResolveCount` | number | `30` | How many completion items to have Metals resolve (documentation, detail, auto-import edits) before showing them. `0` disables resolution. |
+| `scalaNotebook.codeActionResolveCount` | number | `16` | How many code actions to have Metals resolve (the edits of a lazily-computed refactor) before they are offered. A relayed action is never resolved on demand, so an unresolved one would appear in the lightbulb menu and then do nothing. `0` disables resolution. |
+| `scalaNotebook.compileOnSave` | boolean | `true` | Ask Metals to cascade-compile after a regenerated shadow is saved, so diagnostics refresh promptly. |
+| `scalaNotebook.logLevel` | string | `"info"` | `off`/`error`/`warn`/`info`/`debug`/`trace`. Takes effect immediately. Run **Scala Notebook: Show Log** to open the channel. |
 
 ## Repo layout
 
@@ -301,69 +345,77 @@ scala-notebook-shadow/
   src/
     transform.ts       # pure: (cells, config) -> { text, mapping }
     statements.ts       # pure: Scala scanner + conservative statement segmentation
-    generatedSource.ts   # pure: parse Mill's `.dest/` copy markers
-    mapping.ts            # pure: lineToSpan, translateDiagnostic, rebaseDiagnostic
+    scalaCliBuild.ts     # pure: spot scala-cli's `.scala-build/` generated wrappers
+    mapping.ts            # pure: lineToSpan, translateDiagnostic, shadowLinkToCell, shadowEditsToCells
+    semanticTokens.ts     # pure: decode/filter/re-encode delta-encoded semantic tokens
+    shadowNaming.ts       # pure: notebook path -> shadow base name
+    log.ts                # pure: level-filtered logger over an output channel
     shadowManager.ts     # per-notebook state: create/open/regenerate/close
+    languageFeatures.ts  # definition, hover, completion, code actions, rename, tokens, ...
     relay.ts             # onDidChangeDiagnostics handler
     extension.ts          # activate(): wires listeners, commands, collection
   test/
-    transform.test.ts    # determinism, header sizing, cell wrapping, magic imports, mapping arithmetic
-    mapping.test.ts       # span lookup, clamping, outside-cell attachment, generated-copy rebasing
+    transform.test.ts    # determinism, header directives, cell wrapping, magic imports
+    goldenShadow.test.ts  # the whole fixture notebook against a committed shadow
+    mapping.test.ts       # span lookup, clamping, outside-cell attachment, edit translation
+    semanticTokens.test.ts  # delta decode/encode, filtering tokens to a cell's lines
     statements.test.ts     # scanner, statement segmentation, bail-out cases
-    generatedSource.test.ts # Mill marker parsing
+    scalaCliBuild.test.ts   # generated-wrapper detection
+    shadowNaming.test.ts    # shadow names: stability, nesting, collisions
+    log.test.ts             # level filtering, formatting, scoping
+    configDefaults.test.ts  # package.json defaults match readConfig's fallbacks
   eslint.config.mjs      # ESLint flat config (type-aware; no-floating-promises off for tests)
 fixture/
-  mill                     # official Mill bootstrap launcher, pinned via .mill-version (1.1.8)
-  build.mill.yaml           # near-empty; only exists so Metals picks Mill as the build server
-  notebook-shadow/          # generated shadow scripts (not checked in)
-  sample.ipynb                # notebook used for the acceptance checklist (issue §8)
+  notebook-shadow/         # generated shadow scripts (not checked in)
+  sample.ipynb              # notebook used for the acceptance checklist (issue §8)
 .github/
   workflows/ci.yml         # lint + typecheck, tests on Node 22/24 (Linux, macOS), VSIX, release on v* tags
   dependabot.yml            # weekly npm and GitHub Actions updates
 ```
 
 `transform.ts` and `mapping.ts` only take `import type * as vscode from "vscode"` (erased at
-compile time), so they have no runtime dependency on the `vscode` module and run under plain
-`node --test`.
+compile time), and `semanticTokens.ts` imports nothing at all, so none of them have a runtime
+dependency on the `vscode` module and all run under plain `node --test`.
 
 ## Acceptance checklist (issue §8)
 
 | # | Criterion | Status |
 |---|---|---|
 | 1 | Opening the notebook creates `notebook-shadow/sample.scala` with the §4 layout | Implemented (`shadowManager.openForNotebook`); needs a live VS Code + Metals session to observe |
-| 2 | Cell 2 shows a type-mismatch, cell 3 shows "not found", cells 0/1 clean | Depends on Metals/Mill compiling the shadow file — not verifiable outside a running extension host in this environment |
+| 2 | Cell 2 shows a type-mismatch, cell 3 shows "not found", cells 0/1 clean | Depends on Metals/scala-cli compiling the shadow file — not verifiable outside a running extension host in this environment |
 | 3 | Fixing cell 2 clears its squiggle, cell 3's remains | Same as above — relies on live diagnostics |
 | 4 | Inserting a markdown cell doesn't change reported diagnostics, mapping shifts correctly | Covered by unit test (`transform.test.ts`: "markdown and non-scala cells are skipped entirely") for the mapping-shift part; live squiggle behavior needs manual verification |
 | 5 | An error on cell 1's second line squiggles at line 1, not line 0 or another cell | Covered by unit test (`mapping.test.ts` translateDiagnostic tests) for the line-arithmetic part; live verification needed |
 | 6 | `import $ivy` cell: header gains the dep, line is commented in place, no error after reimport | Transform behavior covered by unit tests (`transform.test.ts` $ivy tests); per Phase 0, a manual `Metals: Import Build` (possibly plus a clean) is required and is **not** automated — this is a documented manual step, not a bug |
 | 7 | Closing/reopening the notebook clears then restores squiggles without duplicating the shadow file | Implemented (`closeForNotebook` clears diagnostics and drops state; `openForNotebook` no-ops if the file already exists and reconciles `appliedText` from disk) — needs live verification |
-| 8 | Unit tests pass | **Pass** — 56/56 (`npm test` in `scala-notebook-shadow/`) |
+| 8 | Unit tests pass | **165 of 166** (`npm test` in `scala-notebook-shadow/`). The one failure is the golden shadow test, which is stale against the locally edited `fixture/sample.ipynb`; regenerate with `UPDATE_GOLDEN=1 npm test` once the fixture is settled. |
 
-Everything gated on "needs a live VS Code + Metals + Mill session" could not be executed in this
+Everything gated on "needs a live VS Code + Metals + scala-cli session" could not be executed in this
 environment (no VS Code extension host / Metals server available here); the code paths implementing
 each behavior are in place and exercised as far as they can be without that host.
 
-## Local Mill modules via `//| moduleDeps` (not implemented — untested)
+## Local sources on the shadow's classpath (not implemented — untested)
 
-A `//|` directive is a valid Scala line comment, so a notebook cell can carry
-`//| moduleDeps: [my.module]`: the kernel ignores it, and the extension could hoist it into the
-shadow header next to `mvnDeps`, giving Metals a local Mill module to type-check cells against
+A `//>` directive is a valid Scala line comment, so a notebook cell could carry
+`//> using file ../my/module`: the kernel ignores it, and the extension could hoist it into the
+shadow header next to the `dep` directives, giving Metals local sources to type-check cells against
 without publishing anything. The extension does **not** do this today — `collectMagicImports`
 (transform.ts) recognizes `$ivy`/`$dep`/`$repo` only. Recorded here because the gotcha below
-applies to any local-module scheme, not just this one.
+applies to any local-module scheme; it was written against Mill's `moduleDeps`
+([issue #10](https://github.com/Quafadas/Almond_Mill_Experiment/issues/10)), which this branch no
+longer has a target for.
 
-**Gotcha: the compile half and the run half go stale at different rates.** `moduleDeps` feeds
-Mill/Metals only. Making the same module available to the running kernel needs a second,
-independent step — `interp.load.cp(...)` over the module's `runClasspath`, in a cell before the one
+**Gotcha: the compile half and the run half go stale at different rates.** A source directive feeds
+the build server and Metals only. Making the same code available to the running kernel needs a
+second, independent step — `interp.load.cp(...)` over the module's `runClasspath`, in a cell before the one
 that imports from it. The two halves then diverge:
 
-- Metals recompiles the module through BSP on every source edit, so diagnostics track its current
-  API.
+- Metals recompiles the sources through BSP on every edit, so diagnostics track their current API.
 - `interp.load.cp` adds URLs to the Ammonite frame's `ReplClassLoader`. The JVM resolves classes by
-  *name* and caches them once loaded, so re-running the cell re-invokes Mill (the `.class` files on
-  disk do update) but any class already loaded keeps its old bytecode.
+  *name* and caches them once loaded, so re-running the cell re-invokes the build (the `.class`
+  files on disk do update) but any class already loaded keeps its old bytecode.
 
-Because `runClasspath` points at a classes **directory** and classes load lazily, the update is
+Because that classpath points at a classes **directory** and classes load lazily, the update is
 *partial*: a class already touched serves old bytecode while an untouched one loads fresh, giving
 `NoSuchMethodError`/`AbstractMethodError` at the seam. Combined with the first point the failure is
 silent — the editor shows green against the module's new API while the kernel still runs the old
@@ -376,20 +428,24 @@ not a hot reload. Publishing under a bumped version doesn't help either: the cla
 unchanged, so the already-loaded ones still win. This is the ordinary JVM REPL constraint that sbt
 `console`, plain Ammonite and `spark-shell` all share, not something the shadow design introduces.
 The practical accommodation is the usual division of labour — stable code in the module,
-fast-moving code in the cells. `moduleDeps` buys *authoring* against a local module, not live
-iteration on one.
+fast-moving code in the cells. A source directive buys *authoring* against a local
+module, not live iteration on one.
 
 ## Known limitations / deviations
 
-- The diagnostic `source` field question in Phase 0 (`"metals"` vs `"bloop"`/`"mill"`) was left
-  unanswered by manual testing; the relay code doesn't special-case `source`, it just passes it
-  through untranslated, so this has no functional impact but is worth confirming later.
+- The diagnostic `source` field question from Phase 0 (`"metals"` vs the build server's own name)
+  was never answered; the relay doesn't special-case `source`, it passes it through untranslated,
+  so this has no functional impact but is worth confirming later.
 - Per issue §5 step 3, the relay does not attempt to reconcile a diagnostics event against a stale
   shadow mapping version — if diagnostics arrive for an older shadow revision than the current
   mapping, they may be mis-positioned. Accepted for the POC, as specified.
-- Reimports/cleans required by Mill/Metals (new shadow file, or an edited `//|` header) are surfaced
-  to the user as a manual step (via the existing Metals commands), not automated — consistent with
-  the issue's explicit scope boundary.
+- Metals' prompt to import a newly generated `.sc` is left to the user to accept, not scripted —
+  consistent with the issue's explicit scope boundary. Whether it reappears per shadow file or only
+  once per workspace is issue #15 §5.5, unanswered.
+- Diagnostics reported against scala-cli's generated wrapper under `.scala-build/` are **not**
+  relayed: that copy carries no marker naming the script it came from, so the line offset would be
+  a guess. They are logged at `debug` instead. Whether Metals reports there at all is issue #15
+  §5.4 — see [Status](#status).
 - A cell that redefines a name *and reads the old value in the same statement* (`val n = n + 1`)
   reports *"Recursive value n needs type"*. Nesting lets the new `n` shadow the old one, but inside
   its own scope the reference resolves to the definition being made; only rewriting the cell's text
@@ -400,26 +456,46 @@ iteration on one.
   pair, not companions. This matches Almond, where a companion pair must be written in one cell.
 - `$file` imports are neutralized rather than resolved, so names they would have brought into scope
   report as "not found" in the shadow file.
+- A code action Metals computes with a server-side **command** rather than a `WorkspaceEdit` is
+  dropped, not offered: its arguments name the shadow file and shadow positions, and if it ran, its
+  edit would land in the shadow script and be discarded by the next regenerate.
+- **Organize Imports** is deliberately not offered. Metals organizes the whole shadow script's
+  imports, so its edits rewrite the Almond prelude — text no cell contains — and the relay refuses
+  to move generated code into a cell. Only an out-of-cell *insertion* is re-homed, which is what
+  lets "import missing symbol" put its import at the top of the requesting cell.
+- **Rename** is all-or-nothing: if any occurrence lands on a synthesized `resN_M` binding, in the
+  prelude or in another notebook's shadow, the whole rename is refused with a message rather than
+  applied to the occurrences that did fit. A half-renamed notebook would no longer compile.
+- **Formatting** is not offered at all. scalafmt would reindent every cell body to sit inside the
+  wrapper object, so formatting a cell would return a +2-space edit on every line. This is gated on
+  issue #15 §5.7 — see [Status](#status).
+- **Semantic highlighting** is registered lazily, because the provider needs Metals' own token
+  legend and that can only be read once Metals has loaded a shadow script; until then cells keep
+  TextMate colours. Metals also registers a semantic-tokens provider for `scala`, and VS Code picks
+  one provider rather than merging them, so which one answers for a cell is not something this
+  extension controls.
 - `resN_M` bindings are numbered by document order, so they only line up with the kernel if the
   notebook was run top to bottom. A statement the scanner can't read confidently gets no binding,
   and a reference to it still reports "not found".
-- A local Mill module made visible to cells via `//| moduleDeps` plus `interp.load.cp` goes stale in
-  the kernel but not in the editor, so cells can type-check against an API the running kernel does
-  not have. See "Local Mill modules" above; the only remedy is a kernel restart.
-- `compileOnCreate` invokes `./mill <path>:compile` via a plain child process with no timeout or
-  output surfaced beyond an output channel; adequate for a POC, not for production use.
+- Local sources put on the shadow's classpath and loaded into the kernel with `interp.load.cp` go
+  stale in the kernel but not in the editor, so cells can type-check against an API the running
+  kernel does not have. See "Local sources" above; the only remedy is a kernel restart.
 
 ## Things Phase 0 got wrong relative to initial assumptions (§10)
 
 This is the most valuable output of the POC, per the issue:
 
-1. **A reimport is required more often than expected** — not just once per workspace, but on every
-   new shadow file (i.e., effectively once per newly-opened notebook), and again whenever the
-   `//|` header changes shape (new `mvnDeps` entries).
-2. **A reimport alone is not enough after a header change** — a full module **clean** was needed,
-   which is a heavier, more disruptive operation than initially assumed and makes the "add a
-   dependency via `import $ivy`" acceptance flow (§8 item 6) noticeably less smooth than plain
-   concatenation would suggest.
-3. **Hidden directories are actively harmful, not just untested** — a `.`-prefixed shadow directory
-   doesn't merely "not get picked up automatically"; the file becomes invisible to Mill outright and
-   is never compiled, confirming the shadow directory must be a normal, visible directory.
+1. **A reimport was required more often than expected** — not just once per workspace, but on every
+   new shadow file (effectively once per newly-opened notebook), and again whenever the `//|` header
+   changed shape.
+2. **A reimport alone was not enough after a header change** — a full module **clean** was needed,
+   heavier and more disruptive than assumed, which made the "add a dependency via `import $ivy`"
+   flow (§8 item 6) noticeably less smooth than plain concatenation would suggest.
+3. **Hidden directories were actively harmful, not just untested** — a `.`-prefixed shadow directory
+   didn't merely "not get picked up automatically"; the file became invisible to Mill outright and
+   was never compiled. The shadow directory must be a normal, visible one.
+
+Items 1 and 2 are what
+[issue #15](https://github.com/Quafadas/Almond_Mill_Experiment/issues/15) set out to remove, and
+why the Mill target is gone. Both need re-measuring against scala-cli before they can be called
+fixed — see [Status](#status).

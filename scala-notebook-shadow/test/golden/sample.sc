@@ -1,13 +1,11 @@
-//| scalaVersion: 3.7.2
-//| repositories:
-//| - https://jitpack.io
-//| mvnDeps:
-//| - com.lihaoyi:ammonite-repl-api_3.3.7:3.0.8
-//| - sh.almond::jupyter-api:0.14.5
-//| - com.lihaoyi::os-lib:0.11.3
-//| - com.lihaoyi::upickle:4.0.2
-//| scalacOptions:
-//| - -Wconf:msg=A pure expression does nothing in statement position:s
+//> using scala 3.7.2
+//> using repository https://jitpack.io
+//> using dep com.lihaoyi:ammonite-repl-api_3.3.7:3.0.8
+//> using dep sh.almond::jupyter-api:0.14.5
+//> using dep com.lihaoyi::os-lib:0.11.3
+//> using dep com.lihaoyi::upickle:4.0.2
+//> using option "-Wconf:msg=A pure expression does nothing in statement position:s"
+//> using option "-Wconf:msg=Line is indented too far to the left:s"
 object sample {
 import _root_.ammonite.interp.api.InterpBridge.{value => interp}
 import _root_.ammonite.repl.ReplBridge.{value => repl}

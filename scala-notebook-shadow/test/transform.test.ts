@@ -28,14 +28,14 @@ test("determinism: same notebook content produces byte-identical shadow text", (
   assert.deepEqual(a.mapping, b.mapping);
 });
 
-test("header omits mvnDeps block when empty, includes it when configured", () => {
+test("header carries no dep directive when none are configured, one when there is", () => {
   const cells = [cell(0, "1 + 1\n")];
   const withoutDeps = transform(cells, baseConfig);
-  assert.ok(withoutDeps.text.startsWith("//| scalaVersion: 3.7.2\n"));
-  assert.ok(!withoutDeps.text.includes("mvnDeps"));
+  assert.ok(withoutDeps.text.startsWith("//> using scala 3.7.2\n"));
+  assert.ok(!withoutDeps.text.includes("//> using dep"));
 
   const withDeps = transform(cells, { ...baseConfig, mvnDeps: ["com.lihaoyi::upickle:4.0.2"] });
-  assert.ok(withDeps.text.includes("//| mvnDeps:\n//| - com.lihaoyi::upickle:4.0.2\n"));
+  assert.ok(withDeps.text.includes("//> using dep com.lihaoyi::upickle:4.0.2\n"));
 });
 
 test("markdown and non-scala cells are skipped entirely", () => {
@@ -58,7 +58,7 @@ test("markdown and non-scala cells are skipped entirely", () => {
 test("$ivy import lines are rewritten in place and added to mvnDeps, preserving line numbers", () => {
   const cells = [cell(0, 'import $ivy.`com.lihaoyi::upickle:4.0.2`\nval j = upickle.default.write(1)\n')];
   const { text, mapping } = transform(cells, baseConfig);
-  assert.ok(text.includes("//| mvnDeps:\n//| - com.lihaoyi::upickle:4.0.2\n"));
+  assert.ok(text.includes("//> using dep com.lihaoyi::upickle:4.0.2\n"));
   assert.ok(text.includes("/* [shadow] import $ivy.`com.lihaoyi::upickle:4.0.2` */"));
 
   const span = mapping.spans[0];
@@ -73,7 +73,7 @@ test("$ivy deps are deduplicated against configured mvnDeps and across cells", (
     cell(1, "import $ivy.`com.lihaoyi::upickle:4.0.2`\n"),
   ];
   const { text } = transform(cells, { ...baseConfig, mvnDeps: ["com.lihaoyi::upickle:4.0.2"] });
-  const occurrences = text.split("//| - com.lihaoyi::upickle:4.0.2").length - 1;
+  const occurrences = text.split("//> using dep com.lihaoyi::upickle:4.0.2").length - 1;
   assert.equal(occurrences, 1);
 });
 
@@ -152,7 +152,7 @@ test("a bare trailing expression cell is emitted verbatim, with its warning supp
   const cells = [cell(0, "val n = 2\n"), cell(1, "n + 1\n")];
   const { text, mapping } = transform(cells, baseConfig);
   assert.ok(
-    text.includes("//| scalacOptions:\n//| - -Wconf:msg=A pure expression does nothing in statement position:s\n")
+    text.includes('//> using option "-Wconf:msg=A pure expression does nothing in statement position:s"\n')
   );
   assert.ok(text.split("\n")[mapping.spans[1].startLine].startsWith("n + 1"));
 });
@@ -175,8 +175,8 @@ test("almondVersion adds the kernel API dependency, JitPack and the predef impor
   const { text, mapping } = transform(cells, { ...baseConfig, almondVersion: "0.14.5" });
   const lines = text.split("\n");
 
-  assert.ok(text.includes("//| repositories:\n//| - https://jitpack.io\n"));
-  assert.ok(text.includes("//| - sh.almond::jupyter-api:0.14.5\n"));
+  assert.ok(text.includes("//> using repository https://jitpack.io\n"));
+  assert.ok(text.includes("//> using dep sh.almond::jupyter-api:0.14.5\n"));
 
   const openIndex = lines.indexOf("object NotebookCells {");
   const prelude = lines.slice(openIndex + 1, mapping.headerLines);
@@ -193,9 +193,9 @@ test("ammoniteVersion adds the Ammonite API dependency and the repl/interp bridg
   const { text, mapping } = transform(cells, { ...baseConfig, ammoniteVersion: "3.0.8" });
   const lines = text.split("\n");
 
-  assert.ok(text.includes("//| - com.lihaoyi:ammonite-repl-api_3.3.7:3.0.8\n"));
+  assert.ok(text.includes("//> using dep com.lihaoyi:ammonite-repl-api_3.3.7:3.0.8\n"));
   // No JitPack: only the Almond half needs it.
-  assert.ok(!text.includes("//| repositories:"));
+  assert.ok(!text.includes("//> using repository"));
 
   const openIndex = lines.indexOf("object NotebookCells {");
   const preludeLines = lines.slice(openIndex + 1, mapping.headerLines);
@@ -252,7 +252,7 @@ test("wrapping preserves exact cell line mapping across a multi-statement cell",
 
 test("$dep is translated like $ivy", () => {
   const { text } = transform([cell(0, "import $dep.`com.lihaoyi::upickle:4.0.2`\n")], baseConfig);
-  assert.ok(text.includes("//| mvnDeps:\n//| - com.lihaoyi::upickle:4.0.2\n"));
+  assert.ok(text.includes("//> using dep com.lihaoyi::upickle:4.0.2\n"));
   assert.ok(text.includes("/* [shadow] import $dep.`com.lihaoyi::upickle:4.0.2` */"));
 });
 
@@ -261,7 +261,7 @@ test("several coordinates on one import line are all collected", () => {
     [cell(0, "import $ivy.`com.lihaoyi::upickle:4.0.2`, $ivy.`com.lihaoyi::os-lib:0.11.3`\n")],
     baseConfig
   );
-  assert.ok(text.includes("//| - com.lihaoyi::upickle:4.0.2\n//| - com.lihaoyi::os-lib:0.11.3\n"));
+  assert.ok(text.includes("//> using dep com.lihaoyi::upickle:4.0.2\n//> using dep com.lihaoyi::os-lib:0.11.3\n"));
 });
 
 test("the braced import group form is collected", () => {
@@ -269,14 +269,14 @@ test("the braced import group form is collected", () => {
     [cell(0, "import $ivy.{`com.lihaoyi::upickle:4.0.2`, `com.lihaoyi::os-lib:0.11.3`}\n")],
     baseConfig
   );
-  assert.ok(text.includes("//| - com.lihaoyi::upickle:4.0.2\n//| - com.lihaoyi::os-lib:0.11.3\n"));
+  assert.ok(text.includes("//> using dep com.lihaoyi::upickle:4.0.2\n//> using dep com.lihaoyi::os-lib:0.11.3\n"));
 });
 
 test("$repo becomes a repositories header, emitted before mvnDeps", () => {
   const cells = [cell(0, "import $repo.`https://jitpack.io`\nimport $ivy.`com.lihaoyi::os-lib:0.11.3`\n")];
   const { text } = transform(cells, baseConfig);
-  assert.ok(text.includes("//| repositories:\n//| - https://jitpack.io\n"));
-  assert.ok(text.indexOf("//| repositories:") < text.indexOf("//| mvnDeps:"));
+  assert.ok(text.includes("//> using repository https://jitpack.io\n"));
+  assert.ok(text.indexOf("//> using repository") < text.indexOf("//> using dep"));
   assert.ok(text.includes("/* [shadow] import $repo.`https://jitpack.io` */"));
 });
 
@@ -297,12 +297,12 @@ test("magic imports with no header equivalent are neutralized without adding dep
 });
 
 test("a coordinate using Almond's `_` version placeholder is dropped, not written to the header", () => {
-  // Almond resolves `_` against its own build; Mill cannot, and an unresolvable
+  // Almond resolves `_` against its own build; scala-cli cannot, and an unresolvable
   // header dependency would fail the whole compile and bury every real diagnostic.
   const cells = [cell(0, "import $ivy.`sh.almond::scala-kernel-api:_`\nimport $ivy.`com.lihaoyi::os-lib:0.11.3`\n")];
   const { text } = transform(cells, baseConfig);
-  assert.ok(!text.includes("//| - sh.almond::scala-kernel-api:_"), "not written into the header");
-  assert.ok(text.includes("//| mvnDeps:\n//| - com.lihaoyi::os-lib:0.11.3\n"), "the resolvable dep survives");
+  assert.ok(!text.includes("//> using dep sh.almond::scala-kernel-api:_"), "not written into the header");
+  assert.ok(text.includes("//> using dep com.lihaoyi::os-lib:0.11.3\n"), "the resolvable dep survives");
   assert.ok(text.includes("/* [shadow] import $ivy.`sh.almond::scala-kernel-api:_` */"));
 });
 
@@ -446,7 +446,7 @@ function scopeOpenings(text: string): number[] {
 
 function assertBracesBalance(text: string) {
   const lines = text.split("\n");
-  const opened = lines.filter((l) => /\{$/.test(l) && !l.startsWith("//|")).length;
+  const opened = lines.filter((l) => /\{$/.test(l) && !l.startsWith("//>")).length;
   const closed = lines.filter((l) => l === "}").length;
   assert.equal(closed, opened, "every object opened is closed on its own line");
 }
@@ -530,4 +530,102 @@ test("result bindings and markers are unaffected by a scope opening", () => {
   assert.equal(lines[span.startLine], "val v = 2 ; val res2_1 = (");
   assert.equal(lines[span.startLine + 1], "v + 1)");
   assertColumnsPreserved(cells, text, mapping);
+});
+
+/**
+ * The `//> using` header. Everything below it - the wrapper object, the prelude, cell
+ * markers, bindings, nesting - is covered by the tests above; these pin the directive
+ * spellings, which scala-cli is strict about and which no other test would notice breaking.
+ */
+test("the header opens with the configured Scala version", () => {
+  const { text } = transform([cell(0, "1 + 1\n")], baseConfig);
+  assert.ok(text.startsWith("//> using scala 3.7.2\n"));
+});
+
+test("each dependency and repository gets its own directive, with no grouping key", () => {
+  const cells = [cell(0, "1 + 1\n")];
+  const { text } = transform(cells, {
+    ...baseConfig,
+    almondVersion: "0.14.5",
+    mvnDeps: ["com.lihaoyi::upickle:4.0.2", "com.lihaoyi::os-lib:0.11.3"],
+  });
+
+  assert.ok(text.includes("//> using repository https://jitpack.io\n"));
+  assert.ok(text.includes("//> using dep sh.almond::jupyter-api:0.14.5\n"));
+  assert.ok(text.includes("//> using dep com.lihaoyi::upickle:4.0.2\n"));
+  assert.ok(text.includes("//> using dep com.lihaoyi::os-lib:0.11.3\n"));
+  assert.ok(!text.includes("mvnDeps"), "a directive is one line; there is no list to group under a key");
+  assert.ok(!text.includes("repositories:"));
+});
+
+test("the -Wconf options are quoted, whose values contain spaces", () => {
+  // A directive value is a whitespace-separated token: unquoted, scala-cli reads
+  // `-Wconf:msg=A` and rejects `pure`, `expression`, ... as unknown directive values.
+  const cells = [cell(0, "val n = 2\n"), cell(1, "n + 1\n")];
+  const { text } = transform(cells, baseConfig);
+
+  assert.ok(
+    text.includes('//> using option "-Wconf:msg=A pure expression does nothing in statement position:s"\n')
+  );
+  assert.ok(text.includes('//> using option "-Wconf:msg=Line is indented too far to the left:s"\n'));
+});
+
+test("each -Wconf gets its own option directive", () => {
+  // scala-cli takes one value per `using option`; two suppressions under one directive
+  // would make the second an unknown value rather than a second flag.
+  const cells = [cell(0, "1 + 1\n")];
+  const { text } = transform(cells, baseConfig);
+  const options = text.split("\n").filter((line) => line.startsWith("//> using option "));
+
+  assert.equal(options.length, 2);
+  for (const option of options) {
+    assert.match(option, /^\/\/> using option "[^"]*"$/, `one quoted value in ${option}`);
+  }
+});
+
+test("an indented first line in a cell does not warn later cells to the left", () => {
+  // Scala 3 takes a brace region's indent width from its first body line, and warns on
+  // every later line left of it. Cells are copied verbatim, so a cell that opens indented
+  // sets a width the cells after it fall under - suppressed in the header, since
+  // re-indenting would move columns the mapping treats as identical.
+  const cells = [cell(0, "  val indented = 1\n"), cell(1, "val flush = 2\n")];
+  const { text, mapping } = transform(cells, baseConfig);
+  const lines = text.split("\n");
+
+  assert.equal(lines[mapping.spans[0].startLine], "  val indented = 1");
+  assert.equal(lines[mapping.spans[1].startLine], "val flush = 2");
+  assert.ok(text.includes('//> using option "-Wconf:msg=Line is indented too far to the left:s"\n'));
+});
+
+test("directive order puts the Scala version first and the option last", () => {
+  const cells = [cell(0, "1 + 1\n")];
+  const { text } = transform(cells, { ...baseConfig, almondVersion: "0.14.5" });
+  const directives = text.split("\n").filter((line) => line.startsWith("//>"));
+
+  assert.ok(directives[0].startsWith("//> using scala "));
+  assert.ok(directives[directives.length - 1].startsWith("//> using option "));
+  assert.ok(
+    directives.findIndex((d) => d.startsWith("//> using repository ")) <
+      directives.findIndex((d) => d.startsWith("//> using dep ")),
+    "repositories are declared before the deps that need them"
+  );
+});
+
+test("$ivy coordinates from cells become deps, deduplicated", () => {
+  const cells = [
+    cell(0, "import $ivy.`com.lihaoyi::upickle:4.0.2`\n"),
+    cell(1, "import $ivy.`com.lihaoyi::upickle:4.0.2`\nval x = 1\n"),
+  ];
+  const { text } = transform(cells, baseConfig);
+
+  assert.equal(text.split("//> using dep com.lihaoyi::upickle:4.0.2").length - 1, 1);
+});
+
+test("headerLines counts the directives, so cells still map to their own lines", () => {
+  const cells = [cell(0, "val x = 1\n")];
+  const { text, mapping } = transform(cells, baseConfig);
+  const lines = text.split("\n");
+
+  assert.equal(lines[mapping.headerLines], `/* --- cell 0 ${cells[0].uri.fragment} */`);
+  assert.ok(lines[mapping.spans[0].startLine].startsWith("val x = 1"));
 });

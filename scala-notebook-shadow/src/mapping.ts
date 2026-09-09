@@ -38,42 +38,6 @@ export interface TranslatedDiagnostic {
   diagnostic: PlainDiagnostic;
 }
 
-/** Shift a range by whole lines, clamping at the top of the file. */
-export function rebaseRange(range: PlainRange, lineDelta: number): PlainRange {
-  return {
-    start: { line: Math.max(range.start.line + lineDelta, 0), character: range.start.character },
-    end: { line: Math.max(range.end.line + lineDelta, 0), character: range.end.character },
-  };
-}
-
-/**
- * Translate a diagnostic reported against Mill's generated copy of a shadow script into
- * the shadow file's own coordinates, so the rest of the pipeline never has to know the
- * copy exists. Self-referencing relatedInformation is re-pointed at the shadow file too.
- */
-export function rebaseDiagnostic(
-  diagnostic: PlainDiagnostic,
-  generatedUri: vscode.Uri,
-  shadowUri: vscode.Uri,
-  lineOffset: number
-): PlainDiagnostic {
-  const generatedKey = generatedUri.toString();
-  return {
-    ...diagnostic,
-    range: rebaseRange(diagnostic.range, -lineOffset),
-    relatedInformation: diagnostic.relatedInformation?.map((info) =>
-      info.uri.toString() === generatedKey
-        ? { uri: shadowUri, range: rebaseRange(info.range, -lineOffset), message: info.message }
-        : info
-    ),
-  };
-}
-
-/** Shift a position by whole lines, clamping at the top of the file. */
-export function rebasePosition(position: PlainPosition, lineDelta: number): PlainPosition {
-  return { line: Math.max(position.line + lineDelta, 0), character: position.character };
-}
-
 export function cellPositionToShadow(span: CellSpan, position: PlainPosition): PlainPosition {
   return { line: span.startLine + position.line, character: position.character };
 }
@@ -273,20 +237,14 @@ export interface CellLocationLink {
  * Translate a definition/implementation/reference target that lands in a shadow script back
  * to the notebook cell it was generated from.
  *
- * `lineOffset` is how far the file the target was reported against sits below the shadow
- * file - non-zero when Metals resolved into Mill's generated `.dest/` copy. Returns
- * undefined when the target lands outside every cell (the header, a cell marker, a
+ * Returns undefined when the target lands outside every cell (the header, a cell marker, a
  * synthesized `resN_M` binding), which the caller should treat as "leave the result alone".
  */
 export function shadowLinkToCell(
   mapping: ShadowMapping,
-  link: ShadowLocationLink,
-  lineOffset: number
+  link: ShadowLocationLink
 ): CellLocationLink | undefined {
-  const targetRange = rebaseRange(link.targetRange, -lineOffset);
-  const targetSelectionRange = link.targetSelectionRange
-    ? rebaseRange(link.targetSelectionRange, -lineOffset)
-    : undefined;
+  const { targetRange, targetSelectionRange } = link;
 
   // Prefer the name range to decide which cell owns the target: a definition's full range
   // can start on a line the cell doesn't own (a leading annotation, say).
@@ -337,4 +295,100 @@ export function spanLineBounds(span: CellSpan): { firstLine: number; lastLine: n
  */
 export function isAppendedColumn(position: PlainPosition, cellLineLength: number): boolean {
   return position.character > cellLineLength;
+}
+
+/** A text edit in plain line/character coordinates, free of the VS Code runtime. */
+export interface PlainTextEdit {
+  range: PlainRange;
+  newText: string;
+}
+
+/** The edits one notebook cell receives, in the order they were given. */
+export interface CellTextEdits {
+  cellUri: vscode.Uri;
+  edits: PlainTextEdit[];
+}
+
+export interface ShadowEditTranslation {
+  /** Edits grouped by cell, cells in the order their first edit appeared. */
+  cells: CellTextEdits[];
+  /** How many edits landed outside every cell and were re-homed into `hoistTo`. */
+  hoisted: number;
+}
+
+function isEmptyRange(range: PlainRange): boolean {
+  return range.start.line === range.end.line && range.start.character === range.end.character;
+}
+
+/** Whether any cell span owns a line in `[firstLine, lastLine]`. */
+function overlapsAnySpan(mapping: ShadowMapping, firstLine: number, lastLine: number): boolean {
+  return mapping.spans.some(
+    (span) => span.startLine <= lastLine && span.startLine + span.lineCount - 1 >= firstLine
+  );
+}
+
+/**
+ * Translate edits a language feature wants to make to a shadow script into edits on the
+ * notebook cells it was generated from.
+ *
+ * All-or-nothing: undefined means at least one edit cannot be honestly re-homed, and the
+ * caller must abandon the whole operation rather than apply the rest. A half-applied rename
+ * or quick fix leaves the cell worse than an unavailable one, and unlike an inlay hint the
+ * user cannot see from the title what got dropped.
+ *
+ * `hoistTo` handles the one case worth rescuing. Metals' "import missing symbol" inserts its
+ * import at the top of the file, which in the shadow is the prelude - outside every cell, so
+ * the rule above would reject the most-wanted quick fix there is. Passing the requesting
+ * cell's span re-homes such an edit to the top of that cell instead, which is both legal in
+ * the shadow (every cell body shares one wrapper object) and faithful to how a notebook
+ * behaves: an import written in one cell is in scope for the cells after it.
+ *
+ * Only an *insertion* is ever hoisted. A replacement or deletion outside every cell means
+ * the feature wants to rewrite generated text - Metals' "organize imports" rewriting the
+ * whole prelude, say - and re-homing that would dump the prelude into the user's cell. Those
+ * reject, and the action simply isn't offered.
+ */
+export function shadowEditsToCells(
+  mapping: ShadowMapping,
+  edits: PlainTextEdit[],
+  hoistTo?: CellSpan
+): ShadowEditTranslation | undefined {
+  const byCell = new Map<string, CellTextEdits>();
+  let hoisted = 0;
+
+  const record = (span: CellSpan, edit: PlainTextEdit): void => {
+    const key = span.cellUri.toString();
+    const existing = byCell.get(key);
+    if (existing) {
+      existing.edits.push(edit);
+    } else {
+      byCell.set(key, { cellUri: span.cellUri, edits: [edit] });
+    }
+  };
+
+  for (const edit of edits) {
+    const owning = lineToSpan(mapping, edit.range.start.line);
+    if (owning) {
+      const within = rangeWithinSpan(owning, edit.range);
+      if (!within) {
+        // Starts in a cell and reaches past its end, over a marker or a synthesized
+        // binding. There is no cell range that means the same thing.
+        return undefined;
+      }
+      record(owning, { range: within, newText: edit.newText });
+      continue;
+    }
+
+    const touchesACell = overlapsAnySpan(mapping, edit.range.start.line, edit.range.end.line);
+    if (!hoistTo || touchesACell || !isEmptyRange(edit.range)) {
+      return undefined;
+    }
+    record(hoistTo, {
+      range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
+      newText: edit.newText,
+    });
+    hoisted += 1;
+  }
+
+  return { cells: [...byCell.values()], hoisted };
 }

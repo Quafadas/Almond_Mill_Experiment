@@ -21,7 +21,7 @@ import { loadNotebookCells, projectRoot, repoRoot } from "./notebookFixture";
  *     UPDATE_GOLDEN=1 npm test
  */
 const notebookPath = path.join(repoRoot, "fixture", "sample.ipynb");
-const goldenPath = path.join(projectRoot, "test", "golden", "sample.scala");
+const goldenPath = path.join(projectRoot, "test", "golden", "sample.sc");
 
 /** The shadow the extension would write for `fixture/sample.ipynb` with no settings set. */
 function generate(): string {

@@ -70,10 +70,13 @@ export interface TransformResult {
 const DEFAULT_WRAPPER_OBJECT_NAME = "NotebookCells";
 
 /**
- * Scala 3 rejects statements at the top level of a `.scala` file ("Illegal start
- * of toplevel definition"), and Mill splices a script's body in at exactly that
- * position. Almond sidesteps this by wrapping each cell in an object, where a
- * bare statement is simply part of the template body; we wrap for the same reason.
+ * Almond wraps each cell in an object, where a bare statement is simply part of the
+ * template body; we wrap for the same reason, and additionally because the wrapper is what
+ * the redefinition-nesting scheme nests into (see `planScopes`) and what keeps two
+ * notebooks' shadows in one directory from colliding.
+ *
+ * A `.sc` script does allow top-level statements, so the wrapper is no longer load-bearing
+ * for that alone - whether it can go is issue #15 §5.7, unanswered.
  */
 const SCALA_KEYWORDS = new Set([
   "abstract", "case", "catch", "class", "def", "do", "else", "end", "enum", "export",
@@ -90,6 +93,27 @@ const SCALA_KEYWORDS = new Set([
  * otherwise squiggle idiomatic cells.
  */
 const PURE_EXPRESSION_WCONF = "-Wconf:msg=A pure expression does nothing in statement position:s";
+
+/**
+ * Scala 3 takes a brace region's indentation width from its *first* body line and warns on
+ * every later line indented less than that. Cell bodies are copied verbatim, never
+ * re-indented (that is what keeps a cell's columns identical to the shadow's - see
+ * `transform`), so a cell whose first line happens to be indented sets a width the cells
+ * after it, emitted at column 0, then fall under. The result is "Line is indented too far
+ * to the left" on generated structure the user cannot see, let alone fix.
+ *
+ * Re-indenting to satisfy it is not an option: it would shift every column, and inside a
+ * `"""..."""` it would change the string's value. Formatting the script instead would also
+ * rewrite its lines - scalafmt breaks an appended `val resN_M = (` off its cell-marker line
+ * - which is the one thing the whole mapping rests on.
+ *
+ * The `}`-is-missing half of the message is not lost with it: an unclosed brace in a cell
+ * still fails to parse and reports on its own.
+ */
+const INDENTATION_WCONF = "-Wconf:msg=Line is indented too far to the left:s";
+
+/** Warnings the generated structure provokes, which no cell edit could answer. */
+const SUPPRESSED_WARNINGS = [PURE_EXPRESSION_WCONF, INDENTATION_WCONF];
 
 /**
  * The artifact carrying the names Almond's own predef imports.
@@ -197,7 +221,7 @@ function prelude(config: ScalaNotebookConfig): Prelude {
 /**
  * Ammonite/Almond "magic" imports. None are legal Scala, so any line using one is
  * commented out to keep it from erroring. `$ivy`/`$dep`/`$repo` additionally feed the
- * Mill header; `$file`, `$plugin`, `$scalac` and `$profile` have no shadow-file
+ * `//> using` header; `$file`, `$plugin`, `$scalac` and `$profile` have no shadow-file
  * equivalent and are only neutralized.
  */
 const MAGIC_IMPORT_LINE_RE = /^\s*import\s+\$(?:ivy|dep|repo|file|plugin|scalac|profile)\b/;
@@ -262,14 +286,14 @@ function backtickedTerms(text: string): string[] {
 /**
  * Almond resolves a `_` version against its own build (e.g. `sh.almond::scala-kernel-api:_`).
  * We have no such mapping, so the coordinate is dropped rather than written into the
- * header, where Mill would fail to resolve it and bury every real diagnostic.
+ * header, where scala-cli would fail to resolve it and bury every real diagnostic.
  */
 function isResolvableCoordinate(coordinate: string): boolean {
   return !coordinate.endsWith(":_");
 }
 
 /**
- * If `line` is a magic import, record what it contributes to the Mill header and
+ * If `line` is a magic import, record what it contributes to the `//> using` header and
  * report true so the caller comments the line out. Returns false for ordinary Scala.
  */
 function collectMagicImports(line: string, into: MagicImports): boolean {
@@ -450,6 +474,30 @@ function planScopes(cells: PreparedCell[], preamble: string[]): boolean[] {
 }
 
 /**
+ * A scala-cli directive value is a whitespace-separated token, so a value containing a
+ * space has to be double-quoted or scala-cli reads only its first word and rejects the
+ * rest. Only `-Wconf` hits this today, but a coordinate or repository URL arriving from a
+ * cell's `import $ivy` is not ours to trust, so every value goes through here.
+ */
+function directiveValue(value: string): string {
+  return /\s/.test(value) ? `"${value.replace(/(["\\])/g, "\\$1")}"` : value;
+}
+
+/**
+ * The script's `//> using` directives: one per line, and no `deps:`-style grouping, so each
+ * dependency is its own directive rather than an item under a key. That holds for the
+ * `-Wconf`s too: scala-cli takes one `option` value per directive.
+ */
+function header(scalaVersion: string, repositories: string[], deps: string[]): string[] {
+  return [
+    `//> using scala ${directiveValue(scalaVersion)}`,
+    ...repositories.map((repository) => `//> using repository ${directiveValue(repository)}`),
+    ...deps.map((dep) => `//> using dep ${directiveValue(dep)}`),
+    ...SUPPRESSED_WARNINGS.map((wconf) => `//> using option ${directiveValue(wconf)}`),
+  ];
+}
+
+/**
  * Emit the shadow script. Cell bodies are copied verbatim - never re-indented - into the
  * wrapper object, one line per source line, so a cell's line N is always the shadow's
  * line `span.startLine + N`. Cells share one scope until one of them redefines a name,
@@ -477,20 +525,7 @@ export function transform(cells: SourceCell[], config: ScalaNotebookConfig): Tra
   const allDeps = dedupe([...predef.mvnDeps, ...config.mvnDeps, ...magic.mvnDeps]);
   const repositories = dedupe([...predef.repositories, ...magic.repositories]);
 
-  const directives: string[] = [`//| scalaVersion: ${config.scalaVersion}`];
-  if (repositories.length > 0) {
-    directives.push("//| repositories:");
-    for (const repository of repositories) {
-      directives.push(`//| - ${repository}`);
-    }
-  }
-  if (allDeps.length > 0) {
-    directives.push("//| mvnDeps:");
-    for (const dep of allDeps) {
-      directives.push(`//| - ${dep}`);
-    }
-  }
-  directives.push("//| scalacOptions:", `//| - ${PURE_EXPRESSION_WCONF}`);
+  const directives = header(config.scalaVersion, repositories, allDeps);
 
   const outLines: string[] = [...directives, `object ${wrapperObjectName(config)} {`, ...preamble];
   const headerLines = outLines.length;

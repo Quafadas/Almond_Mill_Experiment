@@ -83,16 +83,6 @@ export class Logger {
     return isEnabled(this.threshold(), level);
   }
 
-  /**
-   * Subprocess output, written through unchanged - it arrives already formatted, in chunks
-   * that need not be whole lines. Gated at debug, since a Mill compile is noisy.
-   */
-  raw(chunk: string): void {
-    if (this.enabled("debug")) {
-      this.sink.append(chunk);
-    }
-  }
-
   private write(level: WritableLogLevel, message: LogMessage): void {
     if (!this.enabled(level)) {
       return;

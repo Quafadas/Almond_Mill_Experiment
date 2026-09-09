@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   PlainDiagnostic,
+  PlainTextEdit,
   cellPositionToShadow,
   cellRangeToShadow,
   lineToSpan,
@@ -9,9 +10,8 @@ import {
   isAppendedColumn,
   positionWithinSpan,
   rangeWithinSpan,
-  rebaseDiagnostic,
-  rebaseRange,
   selectionChainWithinSpan,
+  shadowEditsToCells,
   shadowLinkToCell,
   shadowPositionToCell,
   shadowRangeToCell,
@@ -130,38 +130,6 @@ test("translateDiagnostic: relatedInformation pointing at another file is droppe
   assert.deepEqual(result!.diagnostic.relatedInformation, []);
 });
 
-// --- Mill's generated copy ---------------------------------------------------
-
-test("rebaseDiagnostic shifts a generated-copy diagnostic into shadow coordinates", () => {
-  const generated = fakeUri("generated");
-  const shadow = fakeUri("shadow");
-  const rebased = rebaseDiagnostic(
-    {
-      range: { start: { line: 19, character: 4 }, end: { line: 19, character: 9 } },
-      message: "Not found: res1_2",
-      severity: 0,
-      relatedInformation: [
-        { uri: generated, range: { start: { line: 17, character: 0 }, end: { line: 17, character: 3 } }, message: "here" },
-        { uri: fakeUri("elsewhere"), range: { start: { line: 5, character: 0 }, end: { line: 5, character: 1 } }, message: "other" },
-      ],
-    },
-    generated,
-    shadow,
-    2
-  );
-
-  assert.deepEqual(rebased.range, { start: { line: 17, character: 4 }, end: { line: 17, character: 9 } });
-  assert.equal(rebased.relatedInformation?.[0].uri, shadow, "self-references are re-pointed at the shadow file");
-  assert.equal(rebased.relatedInformation?.[0].range.start.line, 15);
-  assert.equal(rebased.relatedInformation?.[1].range.start.line, 5, "other files are left alone");
-  assert.equal(rebased.message, "Not found: res1_2");
-});
-
-test("rebaseRange clamps at the top of the file rather than going negative", () => {
-  const clamped = rebaseRange({ start: { line: 0, character: 3 }, end: { line: 1, character: 0 } }, -2);
-  assert.deepEqual(clamped, { start: { line: 0, character: 3 }, end: { line: 0, character: 0 } });
-});
-
 // ---------------------------------------------------------------- rangeWithinSpan
 
 function range(startLine: number, startChar: number, endLine: number, endChar: number) {
@@ -187,7 +155,7 @@ test("rangeWithinSpan rejects a range ending after the span", () => {
 
 test("shadowLinkToCell maps a target in the requesting cell back to that cell", () => {
   const mapping = makeMapping();
-  const link = shadowLinkToCell(mapping, { targetRange: range(4, 0, 5, 3) }, 0);
+  const link = shadowLinkToCell(mapping, { targetRange: range(4, 0, 5, 3) });
   assert.equal(link?.cellUri.fragment, "cell1");
   assert.deepEqual(link?.targetRange, range(0, 0, 1, 3));
   assert.equal(link?.targetSelectionRange, undefined);
@@ -195,11 +163,10 @@ test("shadowLinkToCell maps a target in the requesting cell back to that cell", 
 
 test("shadowLinkToCell maps a target in a different cell to that other cell", () => {
   const mapping = makeMapping();
-  const link = shadowLinkToCell(
-    mapping,
-    { targetRange: range(7, 0, 9, 1), targetSelectionRange: range(8, 6, 8, 9) },
-    0
-  );
+  const link = shadowLinkToCell(mapping, {
+    targetRange: range(7, 0, 9, 1),
+    targetSelectionRange: range(8, 6, 8, 9),
+  });
   assert.equal(link?.cellUri.fragment, "cell2");
   assert.deepEqual(link?.targetRange, range(0, 0, 2, 1));
   assert.deepEqual(link?.targetSelectionRange, range(1, 6, 1, 9));
@@ -208,21 +175,14 @@ test("shadowLinkToCell maps a target in a different cell to that other cell", ()
 test("shadowLinkToCell picks the cell from the selection range, not the full range", () => {
   const mapping = makeMapping();
   // Full range opens on a synthesized line above the cell; the name range is what counts.
-  const link = shadowLinkToCell(mapping, { targetRange: range(3, 0, 5, 1), targetSelectionRange: range(4, 4, 4, 8) }, 0);
+  const link = shadowLinkToCell(mapping, { targetRange: range(3, 0, 5, 1), targetSelectionRange: range(4, 4, 4, 8) });
   assert.equal(link?.cellUri.fragment, "cell1");
-});
-
-test("shadowLinkToCell subtracts the generated-copy line offset before mapping", () => {
-  const mapping = makeMapping();
-  const link = shadowLinkToCell(mapping, { targetRange: range(24, 0, 25, 3) }, 20);
-  assert.equal(link?.cellUri.fragment, "cell1");
-  assert.deepEqual(link?.targetRange, range(0, 0, 1, 3));
 });
 
 test("shadowLinkToCell returns undefined for a target outside every cell", () => {
   const mapping = makeMapping();
   // Line 6 is a cell marker between cell1 and cell2, so there is no cell to point at.
-  assert.equal(shadowLinkToCell(mapping, { targetRange: range(6, 0, 6, 4) }, 0), undefined);
+  assert.equal(shadowLinkToCell(mapping, { targetRange: range(6, 0, 6, 4) }), undefined);
 });
 
 // ---------------------------------------------------------------- positionWithinSpan
@@ -300,4 +260,112 @@ test("a chain that escapes immediately keeps nothing", () => {
 
 test("an empty chain stays empty", () => {
   assert.deepEqual(selectionChainWithinSpan(chainSpan, []), []);
+});
+
+function edit(
+  startLine: number,
+  startChar: number,
+  endLine: number,
+  endChar: number,
+  newText = "x"
+): PlainTextEdit {
+  return {
+    range: { start: { line: startLine, character: startChar }, end: { line: endLine, character: endChar } },
+    newText,
+  };
+}
+
+/** An insertion, which is the only shape an out-of-cell edit is ever hoisted for. */
+function insertion(line: number, character: number, newText: string): PlainTextEdit {
+  return { range: { start: { line, character }, end: { line, character } }, newText };
+}
+
+test("shadowEditsToCells translates an edit inside a cell into cell coordinates", () => {
+  const mapping = makeMapping();
+  const result = shadowEditsToCells(mapping, [edit(5, 2, 5, 8, "renamed")]);
+
+  assert.equal(result?.cells.length, 1);
+  assert.equal(result?.hoisted, 0);
+  assert.equal(result?.cells[0].cellUri.toString(), fakeUri("cell1").toString());
+  assert.deepEqual(result?.cells[0].edits, [
+    { range: { start: { line: 1, character: 2 }, end: { line: 1, character: 8 } }, newText: "renamed" },
+  ]);
+});
+
+test("shadowEditsToCells groups edits by cell, in the order the cells first appear", () => {
+  const mapping = makeMapping();
+  const result = shadowEditsToCells(mapping, [edit(8, 0, 8, 1, "b"), edit(2, 0, 2, 1, "a"), edit(9, 0, 9, 1, "c")]);
+
+  assert.deepEqual(
+    result?.cells.map((cell) => cell.cellUri.toString()),
+    [fakeUri("cell2").toString(), fakeUri("cell0").toString()]
+  );
+  assert.deepEqual(
+    result?.cells[0].edits.map((e) => [e.range.start.line, e.newText]),
+    [
+      [1, "b"],
+      [2, "c"],
+    ]
+  );
+});
+
+test("shadowEditsToCells rejects an edit that starts in a cell and reaches past its end", () => {
+  const mapping = makeMapping();
+  // cell1 owns lines 4-5; line 6 is the marker for cell2.
+  assert.equal(shadowEditsToCells(mapping, [edit(5, 0, 6, 3)]), undefined);
+});
+
+test("shadowEditsToCells rejects an edit outside every cell when there is nowhere to hoist it", () => {
+  const mapping = makeMapping();
+  assert.equal(shadowEditsToCells(mapping, [insertion(0, 0, "import foo.Bar\n")]), undefined);
+});
+
+test("shadowEditsToCells hoists an out-of-cell insertion to the top of the given cell", () => {
+  const mapping = makeMapping();
+  const result = shadowEditsToCells(mapping, [insertion(1, 0, "import foo.Bar\n")], mapping.spans[2]);
+
+  assert.equal(result?.hoisted, 1);
+  assert.equal(result?.cells[0].cellUri.toString(), fakeUri("cell2").toString());
+  assert.deepEqual(result?.cells[0].edits, [
+    {
+      range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
+      newText: "import foo.Bar\n",
+    },
+  ]);
+});
+
+test("shadowEditsToCells refuses to hoist a replacement, which would move generated text into a cell", () => {
+  const mapping = makeMapping();
+  // What "organize imports" looks like: rewriting the prelude rather than inserting into it.
+  assert.equal(shadowEditsToCells(mapping, [edit(0, 0, 1, 0, "import a.b\n")], mapping.spans[2]), undefined);
+});
+
+test("shadowEditsToCells rejects an out-of-cell edit that reaches into a cell", () => {
+  const mapping = makeMapping();
+  // Starts on cell1's marker line and ends inside cell1: hoisting it would duplicate the
+  // cell text it swallows, so it is not hoistable however empty its start looks.
+  assert.equal(shadowEditsToCells(mapping, [edit(3, 0, 4, 2)], mapping.spans[1]), undefined);
+});
+
+test("shadowEditsToCells puts a hoisted insertion and the cell's own edits on one cell", () => {
+  const mapping = makeMapping();
+  const result = shadowEditsToCells(
+    mapping,
+    [insertion(0, 0, "import foo.Bar\n"), edit(8, 4, 8, 7, "Bar")],
+    mapping.spans[2]
+  );
+
+  assert.equal(result?.cells.length, 1);
+  assert.equal(result?.hoisted, 1);
+  assert.deepEqual(
+    result?.cells[0].edits.map((e) => [e.range.start.line, e.range.start.character, e.newText]),
+    [
+      [0, 0, "import foo.Bar\n"],
+      [1, 4, "Bar"],
+    ]
+  );
+});
+
+test("shadowEditsToCells accepts an empty edit list", () => {
+  assert.deepEqual(shadowEditsToCells(makeMapping(), []), { cells: [], hoisted: 0 });
 });
