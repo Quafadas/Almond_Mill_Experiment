@@ -5,6 +5,7 @@
 //> using dep com.lihaoyi::os-lib:0.11.3
 //> using dep com.lihaoyi::upickle:4.0.2
 //> using option "-Wconf:msg=A pure expression does nothing in statement position:s"
+//> using option "-Wconf:msg=Line is indented too far to the left:s"
 object sample {
 import _root_.ammonite.interp.api.InterpBridge.{value => interp}
 import _root_.ammonite.repl.ReplBridge.{value => repl}

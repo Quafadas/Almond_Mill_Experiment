@@ -95,6 +95,27 @@ const SCALA_KEYWORDS = new Set([
 const PURE_EXPRESSION_WCONF = "-Wconf:msg=A pure expression does nothing in statement position:s";
 
 /**
+ * Scala 3 takes a brace region's indentation width from its *first* body line and warns on
+ * every later line indented less than that. Cell bodies are copied verbatim, never
+ * re-indented (that is what keeps a cell's columns identical to the shadow's - see
+ * `transform`), so a cell whose first line happens to be indented sets a width the cells
+ * after it, emitted at column 0, then fall under. The result is "Line is indented too far
+ * to the left" on generated structure the user cannot see, let alone fix.
+ *
+ * Re-indenting to satisfy it is not an option: it would shift every column, and inside a
+ * `"""..."""` it would change the string's value. Formatting the script instead would also
+ * rewrite its lines - scalafmt breaks an appended `val resN_M = (` off its cell-marker line
+ * - which is the one thing the whole mapping rests on.
+ *
+ * The `}`-is-missing half of the message is not lost with it: an unclosed brace in a cell
+ * still fails to parse and reports on its own.
+ */
+const INDENTATION_WCONF = "-Wconf:msg=Line is indented too far to the left:s";
+
+/** Warnings the generated structure provokes, which no cell edit could answer. */
+const SUPPRESSED_WARNINGS = [PURE_EXPRESSION_WCONF, INDENTATION_WCONF];
+
+/**
  * The artifact carrying the names Almond's own predef imports.
  *
  * `jupyter-api` is used rather than `scala-kernel-api`, which is what a notebook's
@@ -464,14 +485,15 @@ function directiveValue(value: string): string {
 
 /**
  * The script's `//> using` directives: one per line, and no `deps:`-style grouping, so each
- * dependency is its own directive rather than an item under a key.
+ * dependency is its own directive rather than an item under a key. That holds for the
+ * `-Wconf`s too: scala-cli takes one `option` value per directive.
  */
 function header(scalaVersion: string, repositories: string[], deps: string[]): string[] {
   return [
     `//> using scala ${directiveValue(scalaVersion)}`,
     ...repositories.map((repository) => `//> using repository ${directiveValue(repository)}`),
     ...deps.map((dep) => `//> using dep ${directiveValue(dep)}`),
-    `//> using option ${directiveValue(PURE_EXPRESSION_WCONF)}`,
+    ...SUPPRESSED_WARNINGS.map((wconf) => `//> using option ${directiveValue(wconf)}`),
   ];
 }
 
