@@ -1,6 +1,7 @@
 import * as cp from "child_process";
 import * as path from "path";
 import * as vscode from "vscode";
+import { BuildTool, shadowFileExtension } from "./buildTool";
 import { looksLikeGeneratedSource, parseGeneratedSourceHeader } from "./generatedSource";
 import { Logger, LogLevel } from "./log";
 import { ancestorDirectories, findMillRoot, MILL_ROOT_MARKERS } from "./millRoot";
@@ -9,6 +10,7 @@ import { ScalaNotebookConfig, ShadowMapping, SourceCell, transform } from "./tra
 
 export interface ExtensionConfig extends ScalaNotebookConfig {
   logLevel: LogLevel;
+  buildTool: BuildTool;
   completionResolveCount: number;
   shadowDir: string;
   debounceMs: number;
@@ -19,7 +21,7 @@ export interface ExtensionConfig extends ScalaNotebookConfig {
 export interface ShadowState {
   notebook: vscode.NotebookDocument;
   shadowUri: vscode.Uri;
-  /** The Mill build the shadow lives in; the working directory `./mill` is invoked from. */
+  /** The build the shadow lives in; the working directory `./mill` is invoked from. */
   buildRootUri: vscode.Uri;
   /** Relative to `buildRootUri`, e.g. "notebook-shadow/sample.scala". Used for `./mill <path>:compile`. */
   relativePath: string;
@@ -216,10 +218,20 @@ export class ShadowManager implements vscode.Disposable {
   }
 
   /**
-   * The Mill build the notebook's shadow belongs in - the nearest build above it, else the
-   * workspace folder root. Only consulted once per notebook, on open, so the stats are cheap.
+   * The directory the notebook's shadow belongs in - the nearest Mill build above it, else
+   * the workspace folder root. Only consulted once per notebook, on open, so the stats are
+   * cheap.
+   *
+   * scala-cli needs no build file, so the walk is not a requirement there the way it is for
+   * Mill; it still runs, because a workspace holding a Mill project in a subdirectory wants
+   * its shadows beside that project rather than at the root of an unrelated parent, and
+   * Mill does not claim `.sc` files in a subdirectory of its own accord (issue #15 §5.1).
    */
-  private async buildRoot(notebook: vscode.NotebookDocument, folder: vscode.WorkspaceFolder): Promise<vscode.Uri> {
+  private async buildRoot(
+    notebook: vscode.NotebookDocument,
+    folder: vscode.WorkspaceFolder,
+    buildTool: BuildTool
+  ): Promise<vscode.Uri> {
     const exists = async (uri: vscode.Uri): Promise<boolean> => {
       try {
         await vscode.workspace.fs.stat(uri);
@@ -245,10 +257,37 @@ export class ShadowManager implements vscode.Disposable {
       probed.get(path.join(directory, marker)) === true
     );
     if (!root) {
-      this.log.debug(`No Mill build found above ${notebook.uri.toString()}; using ${folder.uri.fsPath}`);
+      const consequence = buildTool === "mill" ? "; the shadow will not be compiled" : "";
+      this.log.debug(
+        `No Mill build found above ${notebook.uri.toString()}; using ${folder.uri.fsPath}${consequence}`
+      );
       return folder.uri;
     }
     return vscode.Uri.file(root);
+  }
+
+  /**
+   * Switching `buildTool` renames the shadow rather than moving it: the old `.scala` or `.sc`
+   * stays on disk, in the same directory, wrapped in an object of the same name. Both then
+   * compile, and every cell squiggles with a duplicate-definition error that names a file the
+   * user cannot see. Deleting someone's file on a settings change is worse, so say so instead.
+   */
+  private async warnAboutOtherBuildToolShadow(
+    buildRootUri: vscode.Uri,
+    config: ExtensionConfig,
+    baseName: string
+  ): Promise<void> {
+    const other = config.buildTool === "mill" ? "scala-cli" : "mill";
+    const stale = vscode.Uri.joinPath(buildRootUri, config.shadowDir, `${baseName}${shadowFileExtension(other)}`);
+    try {
+      await vscode.workspace.fs.stat(stale);
+    } catch {
+      return;
+    }
+    this.log.warn(
+      `${stale.fsPath} is left over from buildTool "${other}" and still defines object ${baseName}. ` +
+        `Delete it, or expect duplicate-definition errors on every cell.`
+    );
   }
 
   /**
@@ -293,12 +332,14 @@ export class ShadowManager implements vscode.Disposable {
     }
 
     const config = this.getConfig();
-    const buildRootUri = await this.buildRoot(notebook, folder);
+    const buildRootUri = await this.buildRoot(notebook, folder, config.buildTool);
     // Named relative to the build root, so the name is unique within the shadow directory
     // that holds it without carrying the path from the workspace root as noise.
     const baseName = shadowBaseName(path.relative(buildRootUri.fsPath, notebook.uri.fsPath));
-    const relativePath = path.posix.join(config.shadowDir, `${baseName}.scala`);
-    const shadowUri = vscode.Uri.joinPath(buildRootUri, config.shadowDir, `${baseName}.scala`);
+    const fileName = `${baseName}${shadowFileExtension(config.buildTool)}`;
+    const relativePath = path.posix.join(config.shadowDir, fileName);
+    const shadowUri = vscode.Uri.joinPath(buildRootUri, config.shadowDir, fileName);
+    await this.warnAboutOtherBuildToolShadow(buildRootUri, config, baseName);
 
     const { text, mapping } = transform(this.toSourceCells(notebook), {
       ...config,
@@ -315,7 +356,9 @@ export class ShadowManager implements vscode.Disposable {
       await vscode.workspace.fs.writeFile(shadowUri, Buffer.from(text, "utf8"));
       this.log.info(`Created ${shadowUri.toString()} (object ${baseName})`);
 
-      if (config.compileOnCreate) {
+      // Mill only: scala-cli has no equivalent task to address, and its BSP server compiles
+      // the directory on its own once Metals connects.
+      if (config.compileOnCreate && config.buildTool === "mill") {
         await this.compileOnce(buildRootUri, relativePath);
       }
     }

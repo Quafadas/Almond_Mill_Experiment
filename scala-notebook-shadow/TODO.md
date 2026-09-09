@@ -67,6 +67,20 @@
 - [x] Retry adoption for a notebook that had no Scala code cell when it opened. The check ran
       once, at open, and a skipped notebook was never reconsidered, so choosing the kernel or
       typing the first code cell afterwards left it without a shadow until it was reopened.
+- [x] Emit the shadow as a scala-cli script (`.sc` with `//> using` directives) instead of a
+      Mill script (`.scala` with a `//|` header), behind `scalaNotebook.buildTool`. Mill stays
+      the default: issue #15's probes §5.4-§5.11 are open, and this is what makes them
+      runnable against the real extension rather than hand-written files.
+- [ ] Answer issue #15 §5.4: which file Metals reports scala-cli diagnostics against. If it
+      is the `.scala-build/` wrapper rather than the `.sc`, nothing reaches the cells today -
+      the copy carries no marker naming its source, so the relay logs the URI at `debug` and
+      refuses to guess a line offset. Decides the fate of `generatedSource.ts`.
+- [ ] Answer issue #15 §5.5/§5.6: whether a second `.sc` and a changed `//> using dep` are
+      picked up without a restart. These are the findings that would let the Mill requirement
+      come out of the README entirely.
+- [ ] Answer issue #15 §5.7: whether the wrapper object and the `-Wconf` are still needed in a
+      `.sc`, where top-level statements are already legal. If not, the emitter loses both and
+      every cell line maps one-to-one with no wrapper offset.
 - [ ] Suppress or rewrite hover text that exposes synthesized machinery (`resN_M` result
       names, the wrapper/nesting objects in an owner path).
 - [ ] Translate inlay-hint label links that point into the shadow script back to the defining
@@ -101,6 +115,14 @@
 - [x] Unit-test selection-chain truncation at the cell boundary.
 - [x] Unit-test Mill build-root discovery: nearest build above the notebook, the walk not
       escaping the workspace folder, each marker on its own, and the no-build fallback.
+- [x] Unit-test the scala-cli header: directive spellings, one directive per dependency and
+      repository, the quoted `-Wconf` value, ordering, and `$ivy` deduplication.
+- [x] Golden-test the scala-cli shadow for the fixture notebook, and assert that everything
+      below the header is byte-identical to the Mill one.
+- [x] Unit-test the build-tool choice and the file extension it implies, including that the
+      two can never name the same file.
+- [x] Unit-test that scala-cli's `.scala-build/` copies are recognised and not confused with
+      Mill's `.dest/` ones.
 - [ ] Unit-test reference filtering (other notebooks' shadows, synthesized lines,
       de-duplication) - needs the async `resolveShadowSource`, so it waits on Extension Host tests.
 - [ ] Extract completion-result translation into pure, unit-testable functions.
@@ -133,5 +155,11 @@
 - [ ] Verify Shift-Alt-Right expands by syntax within a cell and stops at the cell edge.
 - [ ] Verify inlay hints appear once Mill has produced a `.dest/` copy, and check the log at
       `debug` to see which source answered.
+- [ ] With `buildTool: "scala-cli"`, run issue #15's probes in both `fixture/` and
+      `fixture-nobuild/`: capture Metals' acceptance prompt verbatim, note whether it
+      reappears per shadow file, and record which URI diagnostics arrive on at `debug`.
+- [ ] Verify that switching `buildTool` on a notebook that already has a shadow logs the
+      leftover-file warning, and that deleting the named file clears the duplicate-definition
+      errors it predicts.
 - [ ] Verify closing and reopening a notebook reuses its shadow file rather than creating a
       second one, and that two notebooks sharing a basename get distinct shadows.

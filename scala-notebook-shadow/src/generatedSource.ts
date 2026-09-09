@@ -54,3 +54,18 @@ export function parseGeneratedSourceHeader(text: string): GeneratedSourceHeader 
 export function looksLikeGeneratedSource(fsPath: string): boolean {
   return fsPath.endsWith(".scala") && /[\\/][^\\/]+\.dest[\\/]/.test(fsPath);
 }
+
+/**
+ * scala-cli also compiles a copy rather than the script itself - a wrapper generated under
+ * `.scala-build/`. Whether Metals reports diagnostics against that copy or against the `.sc`
+ * (which its `workspace/wrappedSources` support exists to allow) is issue #15 §5.4, still
+ * unanswered.
+ *
+ * Nothing is relayed from here: the copy carries no marker naming the script it came from,
+ * so the line offset would be a guess, and a wrong guess puts squiggles on the wrong lines.
+ * It exists so the log can say a diagnostic arrived and where, which is what the probe needs
+ * to see - the alternative is a silent drop that reads as "scala-cli reported nothing".
+ */
+export function looksLikeScalaCliGeneratedSource(fsPath: string): boolean {
+  return fsPath.endsWith(".scala") && /[\\/]\.scala-build[\\/]/.test(fsPath);
+}

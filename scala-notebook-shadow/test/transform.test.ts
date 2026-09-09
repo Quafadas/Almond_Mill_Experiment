@@ -531,3 +531,78 @@ test("result bindings and markers are unaffected by a scope opening", () => {
   assert.equal(lines[span.startLine + 1], "v + 1)");
   assertColumnsPreserved(cells, text, mapping);
 });
+
+/**
+ * The scala-cli header (issue #15). Only the directive block differs between the two build
+ * tools - everything below it, from the wrapper object down, is shared - so these pin the
+ * spellings and leave the body to the tests above.
+ */
+const scalaCliConfig: ScalaNotebookConfig = { ...baseConfig, buildTool: "scala-cli" };
+
+test("scala-cli emits //> using directives instead of Mill's //| header", () => {
+  const cells = [cell(0, "1 + 1\n")];
+  const { text } = transform(cells, scalaCliConfig);
+
+  assert.ok(text.startsWith("//> using scala 3.7.2\n"));
+  assert.ok(!text.includes("//|"), "no Mill header survives");
+});
+
+test("scala-cli gives each dependency and repository its own directive, with no grouping key", () => {
+  const cells = [cell(0, "1 + 1\n")];
+  const { text } = transform(cells, {
+    ...scalaCliConfig,
+    almondVersion: "0.14.5",
+    mvnDeps: ["com.lihaoyi::upickle:4.0.2", "com.lihaoyi::os-lib:0.11.3"],
+  });
+
+  assert.ok(text.includes("//> using repository https://jitpack.io\n"));
+  assert.ok(text.includes("//> using dep sh.almond::jupyter-api:0.14.5\n"));
+  assert.ok(text.includes("//> using dep com.lihaoyi::upickle:4.0.2\n"));
+  assert.ok(text.includes("//> using dep com.lihaoyi::os-lib:0.11.3\n"));
+  assert.ok(!text.includes("mvnDeps"), "Mill's grouping keys have no scala-cli equivalent");
+  assert.ok(!text.includes("repositories:"));
+});
+
+test("scala-cli quotes the -Wconf option, whose value contains spaces", () => {
+  // A directive value is a whitespace-separated token: unquoted, scala-cli reads
+  // `-Wconf:msg=A` and rejects `pure`, `expression`, ... as unknown directive values.
+  const cells = [cell(0, "val n = 2\n"), cell(1, "n + 1\n")];
+  const { text } = transform(cells, scalaCliConfig);
+
+  assert.ok(
+    text.includes('//> using option "-Wconf:msg=A pure expression does nothing in statement position:s"\n')
+  );
+});
+
+test("scala-cli directive order puts the Scala version first and the option last", () => {
+  const cells = [cell(0, "1 + 1\n")];
+  const { text } = transform(cells, { ...scalaCliConfig, almondVersion: "0.14.5" });
+  const directives = text.split("\n").filter((line) => line.startsWith("//>"));
+
+  assert.ok(directives[0].startsWith("//> using scala "));
+  assert.ok(directives[directives.length - 1].startsWith("//> using option "));
+  assert.ok(
+    directives.findIndex((d) => d.startsWith("//> using repository ")) <
+      directives.findIndex((d) => d.startsWith("//> using dep ")),
+    "repositories are declared before the deps that need them"
+  );
+});
+
+test("scala-cli takes $ivy coordinates from cells, deduplicated, as Mill does", () => {
+  const cells = [
+    cell(0, "import $ivy.`com.lihaoyi::upickle:4.0.2`\n"),
+    cell(1, "import $ivy.`com.lihaoyi::upickle:4.0.2`\nval x = 1\n"),
+  ];
+  const { text } = transform(cells, scalaCliConfig);
+
+  assert.equal(text.split("//> using dep com.lihaoyi::upickle:4.0.2").length - 1, 1);
+});
+
+test("scala-cli headerLines counts the directives, so cells still map to their own lines", () => {
+  const cells = [cell(0, "val x = 1\n")];
+  const { text, mapping } = transform(cells, scalaCliConfig);
+  const lines = text.split("\n");
+
+  assert.equal(lines[mapping.headerLines], `/* --- cell 0 ${cells[0].uri.fragment} */`);
+  assert.ok(lines[mapping.spans[0].startLine].startsWith("val x = 1"));
+});

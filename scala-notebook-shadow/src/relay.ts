@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { looksLikeScalaCliGeneratedSource } from "./generatedSource";
 import { groupByCellUri, PlainDiagnostic, rebaseDiagnostic, translateDiagnostic, TranslatedDiagnostic } from "./mapping";
 import { Logger } from "./log";
 import { ShadowManager, ShadowState } from "./shadowManager";
@@ -68,6 +69,12 @@ export class DiagnosticRelay {
     for (const uri of e.uris) {
       if (this.shadowManager.mightBeShadowSource(uri)) {
         void this.relay(uri);
+      } else if (looksLikeScalaCliGeneratedSource(uri.fsPath)) {
+        // Not relayed - see looksLikeScalaCliGeneratedSource. Logged so issue #15 §5.4 can be
+        // answered from a session rather than guessed at.
+        this.log.debug(
+          () => `Diagnostics on a scala-cli generated copy, which the relay does not claim: ${uri.toString()}`
+        );
       }
     }
   }

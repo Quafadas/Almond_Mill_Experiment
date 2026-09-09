@@ -91,6 +91,19 @@
           "default": [],
           "description": "Lines inserted after the header, before the first cell (e.g. Almond predef imports)."
         },
+        "scalaNotebook.buildTool": {
+          "type": "string",
+          "enum": [
+            "mill",
+            "scala-cli"
+          ],
+          "enumDescriptions": [
+            "Emit a Mill script (.scala with a //| header). Needs a Mill build above the notebook, and a \"Metals: Import Build\" for every new notebook and every changed dependency.",
+            "Emit a scala-cli script (.sc with //> using directives). Metals starts its own scala-cli build server for the shadow directory; experimental, see issue #15."
+          ],
+          "default": "mill",
+          "description": "Build server the shadow scripts are written for. Changing this renames the shadow file; delete the old one by hand."
+        },
         "scalaNotebook.shadowDir": {
           "type": "string",
           "default": "notebook-shadow",

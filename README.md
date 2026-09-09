@@ -285,6 +285,7 @@ kernel too, since Ammonite puts its own classpath in scope there.
 
 | Setting | Type | Default | Notes |
 |---|---|---|---|
+| `scalaNotebook.buildTool` | string | `"mill"` | `"mill"` or `"scala-cli"` — which build server the shadow scripts are written for. See [Targeting scala-cli](#targeting-scala-cli-experimental). Changing it renames the shadow file; delete the old one by hand. |
 | `scalaNotebook.scalaVersion` | string | `"3.7.2"` | Written into `//| scalaVersion`. Must match the kernel you run, otherwise phantom errors. |
 | `scalaNotebook.mvnDeps` | string[] | `[]` | Mill coordinates, e.g. `com.lihaoyi::upickle:4.0.2`. Merged with `$ivy`/`$dep` lines found in cells. |
 | `scalaNotebook.ammoniteVersion` | string | `"3.0.8"` | Ammonite version behind the kernel, whose `repl`/`interp` bridges go in scope. Should match the Ammonite your Almond version embeds. Empty string leaves them out. |
@@ -292,7 +293,58 @@ kernel too, since Ammonite puts its own classpath in scope there.
 | `scalaNotebook.preamble` | string[] | `[]` | Extra lines inserted inside the wrapper object, after the Almond prelude and before the first cell. Behaves like a predef cell, so statements are allowed. |
 | `scalaNotebook.shadowDir` | string | `"notebook-shadow"` | Relative to the Mill build the notebook belongs to (nearest `build.mill`, `build.mill.yaml`, `build.mill.scala` or `.mill-version` at or above it), else the workspace folder root. |
 | `scalaNotebook.debounceMs` | number | `400` | Debounce between a notebook edit and shadow regeneration. |
-| `scalaNotebook.compileOnCreate` | boolean | `false` | Runs `./mill <shadowPath>:compile` once when a shadow file is first created. See Phase 0 findings — not required in practice, kept as an escape hatch. |
+| `scalaNotebook.compileOnCreate` | boolean | `false` | Runs `./mill <shadowPath>:compile` once when a shadow file is first created. See Phase 0 findings — not required in practice, kept as an escape hatch. Ignored under `buildTool: "scala-cli"`, which has no equivalent task to address. |
+
+## Targeting scala-cli (experimental)
+
+Everything above describes the Mill target, which is the default and the only one that has
+been through a full session. `scalaNotebook.buildTool: "scala-cli"` switches the emitter to
+the alternative [issue #15](https://github.com/Quafadas/Almond_Mill_Experiment/issues/15)
+proposes, and exists so that issue's remaining probes can be run against the real extension
+rather than hand-written files.
+
+**Why.** Under Mill, one shadow script is one build target. That is where the two costs
+Phase 0 found come from: a new notebook is a new build target, so it needs a
+`Metals: Import Build`; and an `import $ivy` changes the `//|` header, so it needs a
+reimport and usually a clean. Neither is a property of the shadow-file approach — they are
+properties of Mill script-module discovery. Metals already starts a **separate scala-cli
+BSP server** for a directory of `.sc` files, and scala-cli resolves `//> using dep` itself,
+which would make a new notebook a new *source* rather than a new target.
+
+**What changes.** Only the header and the file name:
+
+| | `"mill"` | `"scala-cli"` |
+|---|---|---|
+| Shadow file | `notebook-shadow/sample.scala` | `notebook-shadow/sample.sc` |
+| Scala version | `//\| scalaVersion: 3.7.2` | `//> using scala 3.7.2` |
+| Repositories | `//\| repositories:` + one `//\| - <url>` each | one `//> using repository <url>` each |
+| Dependencies | `//\| mvnDeps:` + one `//\| - <coord>` each | one `//> using dep <coord>` each |
+| Compiler options | `//\| scalacOptions:` + `//\| - <opt>` | `//> using option "<opt>"` (quoted — the value has spaces) |
+| Needs a build file above the notebook | yes | no |
+
+Everything below the header — the wrapper object, the Almond and Ammonite prelude, cell
+markers, `resN_M` bindings, redefinition nesting — is byte-identical between the two, which
+`goldenShadow.test.ts` asserts directly.
+
+**What is not known yet.** Issue #15's probes §5.4–§5.11 are open, so treat this as
+unfinished:
+
+- Which file Metals reports diagnostics against. If it is scala-cli's generated wrapper
+  under `.scala-build/` rather than the `.sc` itself, **no squiggles will reach the cells**:
+  that copy carries no marker naming the script it came from, so the relay cannot work out a
+  line offset and deliberately does not guess. It logs the URI at `debug` instead — set
+  `scalaNotebook.logLevel` to `debug` and read "Scala Notebook: Show Log" to see whether it
+  fired, which is the observation §5.4 needs.
+- Whether a second notebook's `.sc` is picked up without a restart (§5.5), and whether
+  Metals' acceptance prompt reappears per file.
+- Whether adding a `//> using dep` to a live shadow re-resolves without a restart, and
+  whether a bad coordinate recovers (§5.6).
+- Whether the wrapper object and the `-Wconf` are still needed at all in a `.sc`, where
+  top-level statements are already legal (§5.7).
+
+**Fixtures.** [`fixture/`](fixture/) is the Mill workspace. [`fixture-nobuild/`](fixture-nobuild/)
+is the same notebook with no build file at all, which is what shows whether the scala-cli
+target really is independent of the host build tool.
 
 ## Repo layout
 
@@ -300,8 +352,9 @@ kernel too, since Ammonite puts its own classpath in scope there.
 scala-notebook-shadow/
   src/
     transform.ts       # pure: (cells, config) -> { text, mapping }
+    buildTool.ts        # pure: the mill/scala-cli choice and the file extension it implies
     statements.ts       # pure: Scala scanner + conservative statement segmentation
-    generatedSource.ts   # pure: parse Mill's `.dest/` copy markers
+    generatedSource.ts   # pure: parse Mill's `.dest/` copy markers; spot scala-cli's `.scala-build/` ones
     mapping.ts            # pure: lineToSpan, translateDiagnostic, rebaseDiagnostic
     shadowManager.ts     # per-notebook state: create/open/regenerate/close
     relay.ts             # onDidChangeDiagnostics handler
@@ -310,13 +363,16 @@ scala-notebook-shadow/
     transform.test.ts    # determinism, header sizing, cell wrapping, magic imports, mapping arithmetic
     mapping.test.ts       # span lookup, clamping, outside-cell attachment, generated-copy rebasing
     statements.test.ts     # scanner, statement segmentation, bail-out cases
-    generatedSource.test.ts # Mill marker parsing
+    generatedSource.test.ts # Mill marker parsing, scala-cli copy detection
+    buildTool.test.ts      # the build-tool choice and its file extension
   eslint.config.mjs      # ESLint flat config (type-aware; no-floating-promises off for tests)
 fixture/
   mill                     # official Mill bootstrap launcher, pinned via .mill-version (1.1.8)
   build.mill.yaml           # near-empty; only exists so Metals picks Mill as the build server
   notebook-shadow/          # generated shadow scripts (not checked in)
   sample.ipynb                # notebook used for the acceptance checklist (issue §8)
+fixture-nobuild/
+  sample.ipynb             # the same notebook with no build file, for issue #15's probes
 .github/
   workflows/ci.yml         # lint + typecheck, tests on Node 22/24 (Linux, macOS), VSIX, release on v* tags
   dependabot.yml            # weekly npm and GitHub Actions updates

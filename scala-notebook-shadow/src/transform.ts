@@ -1,4 +1,5 @@
 import type * as vscode from "vscode";
+import { BuildTool } from "./buildTool";
 import {
   definedNames,
   ScannedLine,
@@ -28,6 +29,11 @@ export interface ScalaNotebookConfig {
    * Empty or undefined leaves it out.
    */
   almondVersion?: string;
+  /**
+   * Build server the shadow script is written for, which decides how the header spells
+   * the Scala version, repositories and dependencies. Defaults to Mill.
+   */
+  buildTool?: BuildTool;
   /**
    * Identifier for the object every cell body is nested in (see `transform`).
    * Defaults to `NotebookCells`; ShadowManager passes the shadow file's base
@@ -450,6 +456,56 @@ function planScopes(cells: PreparedCell[], preamble: string[]): boolean[] {
 }
 
 /**
+ * Mill's script header: one YAML mapping, commented with `//|`, whose keys mirror the
+ * `ScalaModule` overrides the script becomes.
+ */
+function millHeader(scalaVersion: string, repositories: string[], deps: string[]): string[] {
+  const lines = [`//| scalaVersion: ${scalaVersion}`];
+  if (repositories.length > 0) {
+    lines.push("//| repositories:", ...repositories.map((repository) => `//| - ${repository}`));
+  }
+  if (deps.length > 0) {
+    lines.push("//| mvnDeps:", ...deps.map((dep) => `//| - ${dep}`));
+  }
+  lines.push("//| scalacOptions:", `//| - ${PURE_EXPRESSION_WCONF}`);
+  return lines;
+}
+
+/**
+ * A scala-cli directive value is a whitespace-separated token, so a value containing a
+ * space has to be double-quoted or scala-cli reads only its first word and rejects the
+ * rest. Only `-Wconf` hits this today, but a coordinate or repository URL arriving from a
+ * cell's `import $ivy` is not ours to trust, so every value goes through here.
+ */
+function directiveValue(value: string): string {
+  return /\s/.test(value) ? `"${value.replace(/(["\\])/g, "\\$1")}"` : value;
+}
+
+/**
+ * scala-cli's `//> using` directives: one per line, and no `deps:`-style grouping, so each
+ * dependency is its own directive rather than an item under a key.
+ */
+function scalaCliHeader(scalaVersion: string, repositories: string[], deps: string[]): string[] {
+  return [
+    `//> using scala ${directiveValue(scalaVersion)}`,
+    ...repositories.map((repository) => `//> using repository ${directiveValue(repository)}`),
+    ...deps.map((dep) => `//> using dep ${directiveValue(dep)}`),
+    `//> using option ${directiveValue(PURE_EXPRESSION_WCONF)}`,
+  ];
+}
+
+function header(
+  buildTool: BuildTool | undefined,
+  scalaVersion: string,
+  repositories: string[],
+  deps: string[]
+): string[] {
+  return buildTool === "scala-cli"
+    ? scalaCliHeader(scalaVersion, repositories, deps)
+    : millHeader(scalaVersion, repositories, deps);
+}
+
+/**
  * Emit the shadow script. Cell bodies are copied verbatim - never re-indented - into the
  * wrapper object, one line per source line, so a cell's line N is always the shadow's
  * line `span.startLine + N`. Cells share one scope until one of them redefines a name,
@@ -477,20 +533,7 @@ export function transform(cells: SourceCell[], config: ScalaNotebookConfig): Tra
   const allDeps = dedupe([...predef.mvnDeps, ...config.mvnDeps, ...magic.mvnDeps]);
   const repositories = dedupe([...predef.repositories, ...magic.repositories]);
 
-  const directives: string[] = [`//| scalaVersion: ${config.scalaVersion}`];
-  if (repositories.length > 0) {
-    directives.push("//| repositories:");
-    for (const repository of repositories) {
-      directives.push(`//| - ${repository}`);
-    }
-  }
-  if (allDeps.length > 0) {
-    directives.push("//| mvnDeps:");
-    for (const dep of allDeps) {
-      directives.push(`//| - ${dep}`);
-    }
-  }
-  directives.push("//| scalacOptions:", `//| - ${PURE_EXPRESSION_WCONF}`);
+  const directives = header(config.buildTool, config.scalaVersion, repositories, allDeps);
 
   const outLines: string[] = [...directives, `object ${wrapperObjectName(config)} {`, ...preamble];
   const headerLines = outLines.length;
