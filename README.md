@@ -334,6 +334,7 @@ kernel too, since Ammonite puts its own classpath in scope there.
 | `scalaNotebook.shadowDir` | string | `"notebook-shadow"` | Relative to the first workspace folder. Metals starts a scala-cli build server for it on its own; no build file is needed. |
 | `scalaNotebook.debounceMs` | number | `400` | Debounce between a notebook edit and shadow regeneration. |
 | `scalaNotebook.completionResolveCount` | number | `30` | How many completion items to have Metals resolve (documentation, detail, auto-import edits) before showing them. `0` disables resolution. |
+| `scalaNotebook.codeActionResolveCount` | number | `16` | How many code actions to have Metals resolve (the edits of a lazily-computed refactor) before they are offered. A relayed action is never resolved on demand, so an unresolved one would appear in the lightbulb menu and then do nothing. `0` disables resolution. |
 | `scalaNotebook.compileOnSave` | boolean | `true` | Ask Metals to cascade-compile after a regenerated shadow is saved, so diagnostics refresh promptly. |
 | `scalaNotebook.logLevel` | string | `"info"` | `off`/`error`/`warn`/`info`/`debug`/`trace`. Takes effect immediately. Run **Scala Notebook: Show Log** to open the channel. |
 
@@ -345,17 +346,19 @@ scala-notebook-shadow/
     transform.ts       # pure: (cells, config) -> { text, mapping }
     statements.ts       # pure: Scala scanner + conservative statement segmentation
     scalaCliBuild.ts     # pure: spot scala-cli's `.scala-build/` generated wrappers
-    mapping.ts            # pure: lineToSpan, translateDiagnostic, shadowLinkToCell
+    mapping.ts            # pure: lineToSpan, translateDiagnostic, shadowLinkToCell, shadowEditsToCells
+    semanticTokens.ts     # pure: decode/filter/re-encode delta-encoded semantic tokens
     shadowNaming.ts       # pure: notebook path -> shadow base name
     log.ts                # pure: level-filtered logger over an output channel
     shadowManager.ts     # per-notebook state: create/open/regenerate/close
-    languageFeatures.ts  # definition, hover, completion, references, inlay hints, ...
+    languageFeatures.ts  # definition, hover, completion, code actions, rename, tokens, ...
     relay.ts             # onDidChangeDiagnostics handler
     extension.ts          # activate(): wires listeners, commands, collection
   test/
     transform.test.ts    # determinism, header directives, cell wrapping, magic imports
     goldenShadow.test.ts  # the whole fixture notebook against a committed shadow
-    mapping.test.ts       # span lookup, clamping, outside-cell attachment
+    mapping.test.ts       # span lookup, clamping, outside-cell attachment, edit translation
+    semanticTokens.test.ts  # delta decode/encode, filtering tokens to a cell's lines
     statements.test.ts     # scanner, statement segmentation, bail-out cases
     scalaCliBuild.test.ts   # generated-wrapper detection
     shadowNaming.test.ts    # shadow names: stability, nesting, collisions
@@ -371,8 +374,8 @@ fixture/
 ```
 
 `transform.ts` and `mapping.ts` only take `import type * as vscode from "vscode"` (erased at
-compile time), so they have no runtime dependency on the `vscode` module and run under plain
-`node --test`.
+compile time), and `semanticTokens.ts` imports nothing at all, so none of them have a runtime
+dependency on the `vscode` module and all run under plain `node --test`.
 
 ## Acceptance checklist (issue §8)
 
@@ -385,7 +388,7 @@ compile time), so they have no runtime dependency on the `vscode` module and run
 | 5 | An error on cell 1's second line squiggles at line 1, not line 0 or another cell | Covered by unit test (`mapping.test.ts` translateDiagnostic tests) for the line-arithmetic part; live verification needed |
 | 6 | `import $ivy` cell: header gains the dep, line is commented in place, no error after reimport | Transform behavior covered by unit tests (`transform.test.ts` $ivy tests); per Phase 0, a manual `Metals: Import Build` (possibly plus a clean) is required and is **not** automated — this is a documented manual step, not a bug |
 | 7 | Closing/reopening the notebook clears then restores squiggles without duplicating the shadow file | Implemented (`closeForNotebook` clears diagnostics and drops state; `openForNotebook` no-ops if the file already exists and reconciles `appliedText` from disk) — needs live verification |
-| 8 | Unit tests pass | **Pass** — 56/56 (`npm test` in `scala-notebook-shadow/`) |
+| 8 | Unit tests pass | **165 of 166** (`npm test` in `scala-notebook-shadow/`). The one failure is the golden shadow test, which is stale against the locally edited `fixture/sample.ipynb`; regenerate with `UPDATE_GOLDEN=1 npm test` once the fixture is settled. |
 
 Everything gated on "needs a live VS Code + Metals + scala-cli session" could not be executed in this
 environment (no VS Code extension host / Metals server available here); the code paths implementing
@@ -453,6 +456,24 @@ module, not live iteration on one.
   pair, not companions. This matches Almond, where a companion pair must be written in one cell.
 - `$file` imports are neutralized rather than resolved, so names they would have brought into scope
   report as "not found" in the shadow file.
+- A code action Metals computes with a server-side **command** rather than a `WorkspaceEdit` is
+  dropped, not offered: its arguments name the shadow file and shadow positions, and if it ran, its
+  edit would land in the shadow script and be discarded by the next regenerate.
+- **Organize Imports** is deliberately not offered. Metals organizes the whole shadow script's
+  imports, so its edits rewrite the Almond prelude — text no cell contains — and the relay refuses
+  to move generated code into a cell. Only an out-of-cell *insertion* is re-homed, which is what
+  lets "import missing symbol" put its import at the top of the requesting cell.
+- **Rename** is all-or-nothing: if any occurrence lands on a synthesized `resN_M` binding, in the
+  prelude or in another notebook's shadow, the whole rename is refused with a message rather than
+  applied to the occurrences that did fit. A half-renamed notebook would no longer compile.
+- **Formatting** is not offered at all. scalafmt would reindent every cell body to sit inside the
+  wrapper object, so formatting a cell would return a +2-space edit on every line. This is gated on
+  issue #15 §5.7 — see [Status](#status).
+- **Semantic highlighting** is registered lazily, because the provider needs Metals' own token
+  legend and that can only be read once Metals has loaded a shadow script; until then cells keep
+  TextMate colours. Metals also registers a semantic-tokens provider for `scala`, and VS Code picks
+  one provider rather than merging them, so which one answers for a cell is not something this
+  extension controls.
 - `resN_M` bindings are numbered by document order, so they only line up with the kernel if the
   notebook was run top to bottom. A statement the scanner can't read confidently gets no binding,
   and a reference to it still reports "not found".

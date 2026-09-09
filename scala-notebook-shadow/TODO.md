@@ -148,6 +148,10 @@
       names, the wrapper/nesting objects in an owner path).
 - [ ] Translate inlay-hint label links that point into the shadow script back to the defining
       cell, rather than stripping them.
+- [ ] Put the completion path's out-of-cell edits through `shadowEditsToCells` too. It re-homes
+      them by collapsing the range to the cell's start, which keeps the text and so does the
+      right thing for an insertion, but silently turns a header *replacement* into an insertion
+      as well - copying the replaced text into the cell rather than moving it.
 - [ ] Recover the code actions that are dropped rather than translated: the command-backed ones
       (a Metals server command against the shadow), and "organize imports", whose edits rewrite
       the prelude. Both would need the emitter's cooperation, not more mapping.

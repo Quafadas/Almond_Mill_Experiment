@@ -7,6 +7,7 @@ import { ScalaNotebookConfig, ShadowMapping, SourceCell, transform } from "./tra
 export interface ExtensionConfig extends ScalaNotebookConfig {
   logLevel: LogLevel;
   completionResolveCount: number;
+  codeActionResolveCount: number;
   shadowDir: string;
   debounceMs: number;
   compileOnSave: boolean;

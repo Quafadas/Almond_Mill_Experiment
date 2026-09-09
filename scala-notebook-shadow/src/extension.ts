@@ -3,7 +3,7 @@ import { CONFIG_DEFAULTS } from "./configDefaults";
 import { LanguageFeatureRelay } from "./languageFeatures";
 import { isLogLevel, LogLevel, Logger } from "./log";
 import { DiagnosticRelay } from "./relay";
-import { ExtensionConfig, ShadowManager } from "./shadowManager";
+import { ExtensionConfig, ShadowManager, ShadowState } from "./shadowManager";
 
 function readLogLevel(cfg: vscode.WorkspaceConfiguration): LogLevel {
   const value = cfg.get<string>("logLevel", CONFIG_DEFAULTS.logLevel);
@@ -15,6 +15,7 @@ function readConfig(): ExtensionConfig {
   return {
     logLevel: readLogLevel(cfg),
     completionResolveCount: cfg.get<number>("completionResolveCount", CONFIG_DEFAULTS.completionResolveCount),
+    codeActionResolveCount: cfg.get<number>("codeActionResolveCount", CONFIG_DEFAULTS.codeActionResolveCount),
     scalaVersion: cfg.get<string>("scalaVersion", CONFIG_DEFAULTS.scalaVersion),
     mvnDeps: cfg.get<string[]>("mvnDeps", CONFIG_DEFAULTS.mvnDeps),
     preamble: cfg.get<string[]>("preamble", CONFIG_DEFAULTS.preamble),
@@ -25,6 +26,23 @@ function readConfig(): ExtensionConfig {
     compileOnSave: cfg.get<boolean>("compileOnSave", CONFIG_DEFAULTS.compileOnSave),
   };
 }
+
+/**
+ * The code-action kinds a cell can actually be offered, which VS Code uses to skip the
+ * provider entirely when a request asks for something else.
+ *
+ * `source.organizeImports` is deliberately absent. Metals organizes the imports of the whole
+ * shadow script, so its edits rewrite the Almond prelude - text no cell contains - and the
+ * relay rejects them. Declaring the kind would put an "Organize Imports" entry in the Source
+ * Action menu that could only ever do nothing.
+ */
+const CELL_CODE_ACTION_KINDS: readonly vscode.CodeActionKind[] = [
+  vscode.CodeActionKind.QuickFix,
+  vscode.CodeActionKind.Refactor,
+  vscode.CodeActionKind.RefactorExtract,
+  vscode.CodeActionKind.RefactorInline,
+  vscode.CodeActionKind.RefactorRewrite,
+];
 
 export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel("Scala Notebook Shadow");
@@ -50,6 +68,49 @@ export function activate(context: vscode.ExtensionContext): void {
   for (const notebook of vscode.workspace.notebookDocuments) {
     void shadowManager.openForNotebook(notebook);
   }
+
+  /**
+   * Semantic highlighting has to be registered with the *server's* token legend, and the
+   * legend can only be asked for against a file the server knows. So unlike every other
+   * provider this one cannot be registered at activation: it waits for a notebook to have a
+   * shadow script that Metals has actually loaded.
+   *
+   * Registration is attempted on each analysis change until it succeeds, because the first
+   * few attempts happen while Metals is still starting its build server, or before the user
+   * has accepted its prompt to import the shadow directory.
+   */
+  let semanticTokens: vscode.Disposable | undefined;
+  let legendPending = false;
+  const registerSemanticTokens = async (state: ShadowState): Promise<void> => {
+    if (semanticTokens || legendPending) {
+      return;
+    }
+    legendPending = true;
+    try {
+      const legend = await vscode.commands.executeCommand<vscode.SemanticTokensLegend | undefined>(
+        "vscode.provideDocumentSemanticTokensLegend",
+        state.shadowUri
+      );
+      if (!legend || legend.tokenTypes.length === 0) {
+        log.debug(
+          () => `No semantic-token legend for ${state.relativePath} yet; cell highlighting stays off for now.`
+        );
+        return;
+      }
+      semanticTokens = vscode.languages.registerDocumentSemanticTokensProvider(
+        scalaNotebookCells,
+        languageFeatures,
+        legend
+      );
+      context.subscriptions.push(semanticTokens);
+      log.info(`Semantic highlighting enabled for cells (${legend.tokenTypes.length} token types).`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      log.debug(`Could not read the semantic-token legend: ${message}`);
+    } finally {
+      legendPending = false;
+    }
+  };
 
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {
@@ -103,6 +164,10 @@ export function activate(context: vscode.ExtensionContext): void {
       relay.onDidChangeDiagnostics(e);
     }),
 
+    shadowManager.onDidChangeAnalysis((state) => {
+      void registerSemanticTokens(state);
+    }),
+
     vscode.languages.registerDefinitionProvider(scalaNotebookCells, languageFeatures),
     vscode.languages.registerTypeDefinitionProvider(scalaNotebookCells, languageFeatures),
     vscode.languages.registerImplementationProvider(scalaNotebookCells, languageFeatures),
@@ -113,6 +178,12 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.languages.registerReferenceProvider(scalaNotebookCells, languageFeatures),
     vscode.languages.registerInlayHintsProvider(scalaNotebookCells, languageFeatures),
     vscode.languages.registerCompletionItemProvider(scalaNotebookCells, languageFeatures, "."),
+    vscode.languages.registerCodeActionsProvider(scalaNotebookCells, languageFeatures, {
+      providedCodeActionKinds: CELL_CODE_ACTION_KINDS,
+    }),
+    vscode.languages.registerRenameProvider(scalaNotebookCells, languageFeatures),
+    vscode.languages.registerDocumentSymbolProvider(scalaNotebookCells, languageFeatures),
+    vscode.languages.registerFoldingRangeProvider(scalaNotebookCells, languageFeatures),
 
     vscode.commands.registerCommand("scalaNotebook.showLog", () => {
       output.show(true);

@@ -60,6 +60,12 @@
           "minimum": 0,
           "description": "How many completion items to have Metals resolve (documentation, detail and auto-import edits) before they are shown. Relayed completions are never resolved on demand, so an unresolved item shows an empty documentation pane. Each resolve is a round trip to Metals; 0 disables resolution."
         },
+        "scalaNotebook.codeActionResolveCount": {
+          "type": "number",
+          "default": 16,
+          "minimum": 0,
+          "description": "How many code actions to have Metals resolve (the edits of a lazily-computed refactor) before they are offered. A relayed code action is never resolved on demand, so an unresolved one would appear in the lightbulb menu and then do nothing. 0 disables resolution."
+        },
         "scalaNotebook.scalaVersion": {
           "type": "string",
           "default": "3.7.2",

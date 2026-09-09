@@ -14,6 +14,7 @@ import type { ExtensionConfig } from "./shadowManager";
 export const CONFIG_DEFAULTS: Readonly<ExtensionConfig> = {
   logLevel: "info",
   completionResolveCount: 30,
+  codeActionResolveCount: 16,
   scalaVersion: "3.7.2",
   mvnDeps: [],
   preamble: [],
