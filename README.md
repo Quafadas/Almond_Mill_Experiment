@@ -456,9 +456,14 @@ module, not live iteration on one.
   pair, not companions. This matches Almond, where a companion pair must be written in one cell.
 - `$file` imports are neutralized rather than resolved, so names they would have brought into scope
   report as "not found" in the shadow file.
-- A code action Metals computes with a server-side **command** rather than a `WorkspaceEdit` is
-  dropped, not offered: its arguments name the shadow file and shadow positions, and if it ran, its
-  edit would land in the shadow script and be discarded by the next regenerate.
+- A code action Metals computes with a server-side **command** rather than a `WorkspaceEdit`
+  ("insert inferred type", "convert to named arguments", "extract method") is offered, but it works
+  differently: there is no edit to translate, because Metals computes the result itself and pushes
+  it at the shadow script with `workspace/applyEdit`. Picking one runs the command, diffs the shadow
+  before and after, and re-homes that single edit into the cell, then rewrites the shadow from the
+  notebook. The diff is the tightest range covering every change, so a command that also touched the
+  prelude or a neighbouring cell yields a range spanning them and is refused with a message rather
+  than applied — the same all-or-nothing rule the `WorkspaceEdit` path uses.
 - **Organize Imports** is deliberately not offered. Metals organizes the whole shadow script's
   imports, so its edits rewrite the Almond prelude — text no cell contains — and the relay refuses
   to move generated code into a cell. Only an out-of-cell *insertion* is re-homed, which is what

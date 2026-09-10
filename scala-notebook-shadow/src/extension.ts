@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 import { CONFIG_DEFAULTS } from "./configDefaults";
-import { LanguageFeatureRelay } from "./languageFeatures";
+import { LanguageFeatureRelay, RUN_SHADOW_COMMAND, ShadowCommandArgs } from "./languageFeatures";
 import { isLogLevel, LogLevel, Logger } from "./log";
 import { DiagnosticRelay } from "./relay";
 import { ExtensionConfig, ShadowManager, ShadowState } from "./shadowManager";
@@ -91,6 +91,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }
     legendPending = true;
     try {
+      await shadowManager.ensureShadowOpen(state);
       const legend = await vscode.commands.executeCommand<vscode.SemanticTokensLegend | undefined>(
         "vscode.provideDocumentSemanticTokensLegend",
         state.shadowUri
@@ -188,6 +189,12 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.languages.registerRenameProvider(scalaNotebookCells, languageFeatures),
     vscode.languages.registerDocumentSymbolProvider(scalaNotebookCells, languageFeatures),
     vscode.languages.registerFoldingRangeProvider(scalaNotebookCells, languageFeatures),
+
+    // Not contributed in package.json: only VS Code invokes it, applying a code action the
+    // relay handed back for a Metals refactor that is computed server-side.
+    vscode.commands.registerCommand(RUN_SHADOW_COMMAND, (args: ShadowCommandArgs) =>
+      languageFeatures.runShadowCodeAction(args)
+    ),
 
     vscode.commands.registerCommand("scalaNotebook.showLog", () => {
       output.show(true);

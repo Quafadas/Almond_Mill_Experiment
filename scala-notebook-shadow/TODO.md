@@ -97,9 +97,16 @@
       cells after it. Only insertions are re-homed - a replacement outside every cell (Metals
       organizing the whole script's imports) would move the prelude into the user's cell, so it
       rejects and the action is not offered.
-- [x] Drop a code action backed by a server-side `command` rather than an edit. Its arguments
-      name the shadow file and shadow positions, and if it ran, its edit would land in the
-      shadow - which the next regenerate discards.
+- [x] ~~Drop a code action backed by a server-side `command` rather than an edit.~~ Superseded:
+      relay it instead. Such a command is computed server-side and pushed at the shadow with
+      `workspace/applyEdit`, so there is no edit to read - but there is a before and an after.
+      The action is offered as a command of ours, which snapshots the shadow, runs Metals'
+      command, waits for the edit to land, diffs, and re-homes the result into the cell before
+      rewriting the shadow from the notebook. `minimalTextEdit` returns the tightest range
+      covering every change, so a refactor that also touched the prelude or a neighbouring cell
+      spans them and is refused, which is the same rule the `WorkspaceEdit` path already had.
+      This is what "insert inferred type", "convert to named arguments" and "extract method"
+      needed - all three carry a command and no edit.
 - [x] Hand back an edit that touches no generated file *unchanged* rather than rebuilt: file
       creations, renames and deletions are not reachable through `WorkspaceEdit.entries()`, so
       rebuilding one would silently drop them and leave "create class in a new file" doing
@@ -119,6 +126,16 @@
       legend can only be asked for against a file Metals has loaded, so registration retries on
       each analysis change until it succeeds. Unlike the inlay-hint settings this needs no
       configuration - `metals.enableSemanticHighlighting` defaults to true.
+- [x] Reopen the shadow before asking for code actions or semantic tokens. Both commands read
+      the shadow's *text model* instead of loading it - `vscode.executeCodeActionProvider`
+      rejects outright, `vscode.provideDocumentSemanticTokens` answers undefined - and VS Code
+      releases the model behind `openTextDocument` about three minutes after its last use.
+      Nothing brought it back: `markClosedIfShadow` set `state.closed` and no one read it, and
+      a regenerate short-circuits when the text is unchanged. So both features worked for a few
+      minutes after an edit and then went quiet for good, with the code-action rejection
+      swallowed by VS Code and absent from our log. `ensureShadowOpen` reopens on demand, and
+      the code-action request is now logged when it fails.
+
 - [x] Answer code actions and semantic tokens without driving shadow writes. VS Code asks for
       code actions on every caret move to decide whether to show the lightbulb, so only a
       deliberate invocation (`CodeActionTriggerKind.Invoke`) synchronizes first; semantic tokens
