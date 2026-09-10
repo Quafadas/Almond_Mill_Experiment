@@ -14,7 +14,7 @@ import {
   shadowRangeToCell,
   spanLineBounds,
 } from "./mapping";
-import { Logger } from "./log";
+import { describeError, errorStack, Logger } from "./log";
 import { looksLikeScalaCliGeneratedSource } from "./scalaCliBuild";
 import { tokensWithinLines } from "./semanticTokens";
 import { ExtensionConfig, ShadowManager, ShadowState } from "./shadowManager";
@@ -735,24 +735,44 @@ export class LanguageFeatureRelay
       return undefined;
     }
 
+    // Unlike definition, hover and the rest, `vscode.executeCodeActionProvider` does not
+    // load the target's text model when it is missing - it rejects. The shadow is never
+    // shown in an editor, so VS Code drops its model a few minutes after the last rewrite,
+    // and from then on every code action request would fail. Reopen it first.
+    await this.shadowManager.ensureShadowOpen(context.state);
+    if (token.isCancellationRequested) {
+      return undefined;
+    }
+
     // `codeActionContext.diagnostics` holds the *cell* diagnostics this extension published,
     // and is deliberately unused: the command below has VS Code build a fresh context from
     // the markers on the shadow URI, which are Metals' own, in the coordinates Metals
     // reported them in. So the diagnostics a quick fix keys off need no back-translation.
-    const results = await vscode.commands.executeCommand<(vscode.CodeAction | vscode.Command)[]>(
-      "vscode.executeCodeActionProvider",
-      context.state.shadowUri,
-      vscodeRange(cellRangeToShadow(context.span, plainRange(range))),
-      codeActionContext.only?.value,
-      Math.max(this.getConfig().codeActionResolveCount, 0)
-    );
+    let results: (vscode.CodeAction | vscode.Command | undefined)[] | undefined;
+    try {
+      results = await vscode.commands.executeCommand<(vscode.CodeAction | vscode.Command | undefined)[]>(
+        "vscode.executeCodeActionProvider",
+        context.state.shadowUri,
+        vscodeRange(cellRangeToShadow(context.span, plainRange(range))),
+        codeActionContext.only?.value,
+        Math.max(this.getConfig().codeActionResolveCount, 0)
+      );
+    } catch (error) {
+      // VS Code swallows a provider rejection, so without this the lightbulb just never
+      // appears and nothing anywhere says why.
+      this.log.error(`codeActions: request against ${context.state.relativePath} failed: ${describeError(error)}`);
+      this.log.debug(() => errorStack(error));
+      return undefined;
+    }
     if (!results || token.isCancellationRequested) {
       return undefined;
     }
 
     const translated: vscode.CodeAction[] = [];
     for (const result of results) {
-      const action = this.translateCodeAction(context, result);
+      // The command's own result type admits undefined entries: a synthesized action whose
+      // command VS Code could not convert comes back as a hole in the array.
+      const action = result && this.translateCodeAction(context, result);
       if (action) {
         translated.push(action);
       }
@@ -984,6 +1004,14 @@ export class LanguageFeatureRelay
     // like inlay hints this follows the shadow instead of synchronizing it.
     const context = this.cellContext(document);
     if (!context || token.isCancellationRequested) {
+      return undefined;
+    }
+
+    // Same trap as code actions: this command reads the shadow's text model rather than
+    // loading it, and answers undefined when VS Code has evicted it - so cells would lose
+    // Metals' highlighting a few minutes after the last edit.
+    await this.shadowManager.ensureShadowOpen(context.state);
+    if (token.isCancellationRequested) {
       return undefined;
     }
 

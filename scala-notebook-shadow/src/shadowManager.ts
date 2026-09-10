@@ -1,6 +1,6 @@
 import * as path from "path";
 import * as vscode from "vscode";
-import { Logger, LogLevel } from "./log";
+import { describeError, errorStack, Logger, LogLevel } from "./log";
 import { looksGenerated, orphanedShadowNames } from "./shadowCleanup";
 import { shadowBaseName, SHADOW_FILE_EXTENSION } from "./shadowNaming";
 import { ScalaNotebookConfig, ShadowMapping, SourceCell, transform } from "./transform";
@@ -12,21 +12,6 @@ export interface ExtensionConfig extends ScalaNotebookConfig {
   shadowDir: string;
   debounceMs: number;
   compileOnSave: boolean;
-}
-
-/**
- * Every shadow operation is started from an event handler or a timer with nothing waiting
- * on it, so a rejection has nowhere to surface: it becomes an unhandled rejection in the
- * extension host log, and the notebook just never gets language features with nothing
- * saying why. These render one for the extension's own log instead.
- */
-function describeError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-/** The stack, for `debug`, where the message alone doesn't say where the failure came from. */
-function errorStack(error: unknown): string {
-  return error instanceof Error && error.stack ? error.stack : String(error);
 }
 
 /** What a shadow written by the previous, Mill-targeted version of the extension was called. */
@@ -463,6 +448,27 @@ export class ShadowManager implements vscode.Disposable {
         this.log.debug(() => errorStack(error));
       }
     }
+  }
+
+  /**
+   * Make sure the shadow has a live text model, reopening it if VS Code evicted it.
+   *
+   * Most `vscode.execute*Provider` commands load the model themselves when it is missing.
+   * A few do not - `vscode.executeCodeActionProvider` rejects outright, and
+   * `vscode.provideDocumentSemanticTokens` answers undefined - and those are exactly the
+   * features that run against a shadow nobody is looking at. VS Code releases the model
+   * reference behind `openTextDocument` about three minutes after the last use, so without
+   * this they stop working a few minutes after the last edit and never recover: a rewrite
+   * reopens the document, but `updateShadow` short-circuits when the text is unchanged.
+   */
+  async ensureShadowOpen(state: ShadowState): Promise<void> {
+    const key = state.shadowUri.toString();
+    if (!state.closed && vscode.workspace.textDocuments.some((doc) => doc.uri.toString() === key)) {
+      return;
+    }
+    await vscode.workspace.openTextDocument(state.shadowUri);
+    state.closed = false;
+    this.log.debug(() => `Reopened ${state.relativePath}; VS Code had evicted its text model`);
   }
 
   /** Shadow documents may be evicted by VS Code while hidden; note it, don't treat as an error. */

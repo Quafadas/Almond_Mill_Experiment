@@ -91,6 +91,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }
     legendPending = true;
     try {
+      await shadowManager.ensureShadowOpen(state);
       const legend = await vscode.commands.executeCommand<vscode.SemanticTokensLegend | undefined>(
         "vscode.provideDocumentSemanticTokensLegend",
         state.shadowUri

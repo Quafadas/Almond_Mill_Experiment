@@ -91,3 +91,21 @@ export class Logger {
     this.sink.appendLine(formatLogLine(this.now(), level, this.scope, text));
   }
 }
+
+/**
+ * Rendering an error for the log.
+ *
+ * Most of what this extension does is started from an event handler, a timer or a language
+ * provider, none of which have a caller waiting: a rejection there becomes an unhandled
+ * rejection in the *extension host* log, or is swallowed outright, and the notebook simply
+ * goes without the feature with nothing saying why. These put one in the extension's own
+ * channel instead.
+ */
+export function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** The stack, for `debug`, where the message alone doesn't say where the failure came from. */
+export function errorStack(error: unknown): string {
+  return error instanceof Error && error.stack ? error.stack : String(error);
+}

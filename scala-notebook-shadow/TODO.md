@@ -119,6 +119,16 @@
       legend can only be asked for against a file Metals has loaded, so registration retries on
       each analysis change until it succeeds. Unlike the inlay-hint settings this needs no
       configuration - `metals.enableSemanticHighlighting` defaults to true.
+- [x] Reopen the shadow before asking for code actions or semantic tokens. Both commands read
+      the shadow's *text model* instead of loading it - `vscode.executeCodeActionProvider`
+      rejects outright, `vscode.provideDocumentSemanticTokens` answers undefined - and VS Code
+      releases the model behind `openTextDocument` about three minutes after its last use.
+      Nothing brought it back: `markClosedIfShadow` set `state.closed` and no one read it, and
+      a regenerate short-circuits when the text is unchanged. So both features worked for a few
+      minutes after an edit and then went quiet for good, with the code-action rejection
+      swallowed by VS Code and absent from our log. `ensureShadowOpen` reopens on demand, and
+      the code-action request is now logged when it fails.
+
 - [x] Answer code actions and semantic tokens without driving shadow writes. VS Code asks for
       code actions on every caret move to decide whether to show the lightbulb, so only a
       deliberate invocation (`CodeActionTriggerKind.Invoke`) synchronizes first; semantic tokens
