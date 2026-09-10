@@ -259,6 +259,109 @@ export function shadowLinkToCell(
   };
 }
 
+/** The shadow-side shape of a call- or type-hierarchy item: its extent, and the part that names it. */
+export interface ShadowHierarchyItem {
+  name: string;
+  range: PlainRange;
+  selectionRange: PlainRange;
+}
+
+export interface CellHierarchyItem {
+  cellUri: vscode.Uri;
+  /**
+   * The span the item was placed in. Hierarchy results carry ranges reported against the
+   * item's own file - an incoming call's call sites, say - and those follow the same span.
+   */
+  span: CellSpan;
+  range: PlainRange;
+  selectionRange: PlainRange;
+}
+
+/** The names the transform gives a cell's result bindings: `res4_0`, and the `res4` alias. */
+const RESULT_BINDING_NAME = /^res\d+(_\d+)?$/;
+
+/**
+ * Place a call- or type-hierarchy item that lands in a shadow script in the cell it was
+ * generated from, or undefined when nothing the user wrote is behind it and the caller
+ * should drop it (the wrapper object, a redefinition scope).
+ *
+ * Ownership is decided by the selection range, which is the item's *name*: an item's full
+ * range can start on a line the cell doesn't own, and a name always sits where it was
+ * written. The full range is kept only if the cell can express it, falling back to the name
+ * range - VS Code requires the selection range to be contained by the range, and a decl the
+ * cell cannot hold whole is still worth listing by name.
+ */
+export function shadowHierarchyItemToCell(
+  mapping: ShadowMapping,
+  item: ShadowHierarchyItem
+): CellHierarchyItem | undefined {
+  const span = lineToSpan(mapping, item.selectionRange.start.line);
+  if (span) {
+    const selectionRange = rangeWithinSpan(span, item.selectionRange);
+    if (!selectionRange) {
+      return undefined;
+    }
+    return {
+      cellUri: span.cellUri,
+      span,
+      range: rangeWithinSpan(span, item.range) ?? selectionRange,
+      selectionRange,
+    };
+  }
+
+  const opened = resultBindingSpan(mapping, item);
+  if (!opened) {
+    return undefined;
+  }
+  // The binding's name is on a generated line, so there is no column in the cell to point
+  // at: it is shown at the cell's start, where a diagnostic outside every cell also goes.
+  // Its extent is that same point rather than the binding's own, which opens on the line
+  // above and so cannot contain a range inside the cell - and VS Code requires an item's
+  // range to contain its selection range.
+  const start = { line: 0, character: 0 };
+  const selectionRange = { start, end: start };
+  return { cellUri: opened.cellUri, span: opened, range: selectionRange, selectionRange };
+}
+
+/**
+ * The cell a synthesized result binding speaks for, if that is what this item is.
+ *
+ * A cell that is a bare expression is bound with `val resN_M = (` written on the line
+ * *before* it - the cell marker - so a hierarchy item for that binding sits outside every
+ * span. Dropping it would take with it every caller that is a top-level statement, which is
+ * the shape most notebook cells have: "who calls `add`?" would list the cells that say
+ * `val total = add(1, 2)` and silently omit the ones that just say `add(total, 40)`. The
+ * binding is the user's statement under a generated name, so it is re-homed to the cell it
+ * opens - the next one to start - and its call sites, which are inside that cell, map
+ * normally.
+ *
+ * Only bindings the transform generated: anything else outside a cell is the wrapper object
+ * or a redefinition scope, which speak for nothing the user wrote. A `resN_M` name cannot
+ * collide with one, since a name the user wrote is inside a span and never reaches here.
+ */
+function resultBindingSpan(mapping: ShadowMapping, item: ShadowHierarchyItem): CellSpan | undefined {
+  if (!RESULT_BINDING_NAME.test(item.name)) {
+    return undefined;
+  }
+  return nearestFollowingSpan(mapping, item.selectionRange.start.line);
+}
+
+/**
+ * The ranges of `ranges` that `span`'s cell can express, in cell coordinates. Unlike a
+ * selection chain this keeps going past one that doesn't fit: the ranges are independent
+ * occurrences (the call sites inside one function), not a nest.
+ */
+export function rangesWithinSpan(span: CellSpan, ranges: readonly PlainRange[]): PlainRange[] {
+  const kept: PlainRange[] = [];
+  for (const range of ranges) {
+    const within = rangeWithinSpan(span, range);
+    if (within) {
+      kept.push(within);
+    }
+  }
+  return kept;
+}
+
 /**
  * `position` expressed in `span`'s cell coordinates, or undefined if it falls outside the
  * span - a synthesized line the cell has no coordinates for.
