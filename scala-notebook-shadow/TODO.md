@@ -140,6 +140,27 @@
       code actions on every caret move to decide whether to show the lightbulb, so only a
       deliberate invocation (`CodeActionTriggerKind.Invoke`) synchronizes first; semantic tokens
       and document symbols follow the shadow like inlay hints do.
+- [x] Forward call hierarchy and type hierarchy, which Metals 1.6.8 advertises alongside the
+      features already relayed (`setCallHierarchyProvider`, `setTypeHierarchyProvider`). Items
+      translate the way a definition does; an incoming call's ranges are call sites inside the
+      *caller* and follow it, while an outgoing call's are in the item that was asked about and
+      follow that instead. Expanding a tree node cannot pass our own item back to Metals:
+      `vscode.provideIncomingCalls` and its siblings take only an item VS Code minted, checking
+      for the session and item ids a `prepare` stamped on it and throwing "invalid item"
+      otherwise. So each expansion re-prepares the same symbol against the shadow first, which
+      also picks up a shadow rewritten since the tree was opened and outlives the ten prepare
+      sessions VS Code keeps.
+- [x] Re-home a hierarchy item for a synthesized `resN_M` binding to the cell it opens. A cell
+      that is a bare expression is bound with `val resN_M = (` on the *marker* line above it, so
+      the caller of `add(total, 40)` is an item outside every span. Dropping it, which is what
+      every other feature does with generated code, would have left "who calls this?" listing
+      the cells that say `val total = add(1, 2)` and silently omitting the ones that just call
+      it - the shape most notebook cells have. Only names the transform generates are re-homed;
+      the wrapper object and the redefinition scopes still speak for nothing and are dropped. A
+      re-homed row is a leaf: its name sits on a generated line, so it is shown at the cell's
+      start, and re-preparing there would find whatever the cell's first line holds - which the
+      name check in `reprepareHierarchyItem` refuses rather than answering about the wrong
+      symbol.
 - [ ] Answer issue #15 §5.5/§5.6: whether a second `.sc` and a changed `//> using dep` are
       picked up without a restart, and whether a bad coordinate recovers. These are the direct
       replacements for Mill's reimport and reimport-plus-clean, and the whole reason for the
@@ -265,6 +286,11 @@
 - [x] Unit-test semantic-token re-encoding: delta decoding, the encode/decode round trip,
       defensive ordering, filtering to a cell's lines, and that a column delta is rebuilt after
       an earlier token on the same line is dropped.
+- [x] Unit-test hierarchy-item placement: the cell that owns an item, ownership decided by the
+      name range rather than the full range, the fall back to the name range when the cell
+      cannot hold the whole item, an item no cell owns, the `resN_M` re-homing (binding and
+      trailing alias), that a name written inside a cell takes the ordinary path, and which of
+      a result's ranges a cell can express.
 - [ ] Unit-test reference filtering (other notebooks' shadows, synthesized lines,
       de-duplication) - needs the VS Code runtime, so it waits on Extension Host tests.
 - [ ] Extract completion-result translation into pure, unit-testable functions.
@@ -307,6 +333,13 @@
       count. Metals registers its own semantic-tokens provider for `scala`; VS Code picks one
       provider rather than merging, so confirm ours is the one asked - if Metals' wins, the
       cells fall back to TextMate colours and this feature is a no-op.
+- [ ] Verify "Show Call Hierarchy" on a `def` used from several cells lists each calling cell,
+      that a cell which only calls it (no `val`) is listed as its `resN_M` binding rather than
+      missing, and that expanding a listed caller walks up another level. Then the same for
+      "Show Type Hierarchy" on a class defined in a cell: supertypes reaching library sources,
+      subtypes reaching other cells.
+- [ ] Verify neither tree shows a row in the shadow script, in `.scala-build/`, or named after
+      the wrapper object or a `shadow scope N`.
 - [ ] Verify expanding/collapsing a fold inside a cell never hides lines the cell does not
       contain.
 - [ ] Run issue #15's open probes against `fixture/`, which now has no build file at all:

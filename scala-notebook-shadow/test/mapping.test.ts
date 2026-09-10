@@ -12,8 +12,10 @@ import {
   isAppendedColumn,
   positionWithinSpan,
   rangeWithinSpan,
+  rangesWithinSpan,
   selectionChainWithinSpan,
   shadowEditsToCells,
+  shadowHierarchyItemToCell,
   shadowLinkToCell,
   shadowPositionToCell,
   shadowRangeToCell,
@@ -428,4 +430,100 @@ test("minimalTextEdit handles an append with no common suffix", () => {
     range: { start: { line: 1, character: 0 }, end: { line: 1, character: 0 } },
     newText: "b\n",
   });
+});
+
+// ---------------------------------------------------------------- hierarchy items
+
+test("shadowHierarchyItemToCell places an item in the cell that owns it", () => {
+  const mapping = makeMapping();
+  const placed = shadowHierarchyItemToCell(mapping, {
+    name: "add",
+    range: range(7, 0, 9, 1),
+    selectionRange: range(7, 4, 7, 8),
+  });
+  assert.equal(placed?.cellUri.fragment, "cell2");
+  assert.equal(placed?.span.cellIndex, 2);
+  assert.deepEqual(placed?.range, range(0, 0, 2, 1));
+  assert.deepEqual(placed?.selectionRange, range(0, 4, 0, 8));
+});
+
+test("shadowHierarchyItemToCell decides ownership by the name range", () => {
+  // A declaration whose range opens on a line the cell doesn't own - an annotation the
+  // transform put above it - still belongs to the cell its name is written in.
+  const mapping = makeMapping();
+  const placed = shadowHierarchyItemToCell(mapping, {
+    name: "add",
+    range: range(3, 0, 5, 1),
+    selectionRange: range(4, 4, 4, 7),
+  });
+  assert.equal(placed?.cellUri.fragment, "cell1");
+  assert.deepEqual(placed?.selectionRange, range(0, 4, 0, 7));
+});
+
+test("shadowHierarchyItemToCell falls back to the name range when the cell can't hold the whole item", () => {
+  const mapping = makeMapping();
+  const placed = shadowHierarchyItemToCell(mapping, {
+    name: "add",
+    range: range(3, 0, 5, 1),
+    selectionRange: range(4, 4, 4, 7),
+  });
+  // VS Code requires the selection range to be contained by the range, so the fallback has
+  // to be the name range itself rather than a clamp that might not contain it.
+  assert.deepEqual(placed?.range, placed?.selectionRange);
+});
+
+test("shadowHierarchyItemToCell drops an item no cell owns", () => {
+  // Line 6 is between two cells: a marker, or the wrapper's own machinery.
+  const mapping = makeMapping();
+  assert.equal(
+    shadowHierarchyItemToCell(mapping, {
+      name: "sample",
+      range: range(6, 0, 6, 4),
+      selectionRange: range(6, 0, 6, 4),
+    }),
+    undefined
+  );
+});
+
+test("shadowHierarchyItemToCell re-homes a result binding to the cell it opens", () => {
+  // `val res2_0 = (` is written on the marker line above cell 2, so the binding's name is
+  // outside every span - but the statement it binds is the cell's own.
+  const mapping = makeMapping();
+  const placed = shadowHierarchyItemToCell(mapping, {
+    name: "res2_0",
+    range: range(6, 20, 8, 1),
+    selectionRange: range(6, 24, 6, 30),
+  });
+  assert.equal(placed?.cellUri.fragment, "cell2");
+  assert.deepEqual(placed?.selectionRange, range(0, 0, 0, 0));
+  assert.deepEqual(placed?.range, range(0, 0, 0, 0));
+});
+
+test("shadowHierarchyItemToCell re-homes the trailing result alias too", () => {
+  const mapping = makeMapping();
+  const placed = shadowHierarchyItemToCell(mapping, {
+    name: "res1",
+    range: range(6, 0, 6, 18),
+    selectionRange: range(6, 4, 6, 8),
+  });
+  assert.equal(placed?.cellUri.fragment, "cell2");
+});
+
+test("shadowHierarchyItemToCell leaves a user-written resN inside a cell where it is", () => {
+  // The re-homing rule only ever sees names outside a span, so a cell that happens to
+  // define `res1` itself takes the ordinary path.
+  const mapping = makeMapping();
+  const placed = shadowHierarchyItemToCell(mapping, {
+    name: "res1",
+    range: range(4, 0, 4, 12),
+    selectionRange: range(4, 4, 4, 8),
+  });
+  assert.equal(placed?.cellUri.fragment, "cell1");
+  assert.deepEqual(placed?.selectionRange, range(0, 4, 0, 8));
+});
+
+test("rangesWithinSpan keeps the ranges a cell can express and drops the rest", () => {
+  const span: CellSpan = { cellIndex: 2, cellUri: fakeUri("cell2"), startLine: 7, lineCount: 3 };
+  const kept = rangesWithinSpan(span, [range(8, 2, 8, 5), range(10, 0, 10, 3), range(9, 1, 9, 4)]);
+  assert.deepEqual(kept, [range(1, 2, 1, 5), range(2, 1, 2, 4)]);
 });

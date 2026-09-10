@@ -471,6 +471,12 @@ module, not live iteration on one.
 - **Rename** is all-or-nothing: if any occurrence lands on a synthesized `resN_M` binding, in the
   prelude or in another notebook's shadow, the whole rename is refused with a message rather than
   applied to the occurrences that did fit. A half-renamed notebook would no longer compile.
+- **Call hierarchy** and **type hierarchy** are relayed, with one notebook-shaped wrinkle: a cell
+  that is a bare expression calls from inside a generated `val resN_M` binding, so it appears in
+  an incoming-calls tree under that name, at the top of the cell, rather than under a name the
+  user wrote. Such a row is a leaf - there is no symbol at the cell's start to walk up from.
+  Callers that Metals attributes to the wrapper object itself are dropped, like any other
+  generated code.
 - **Formatting** is not offered at all. scalafmt would reindent every cell body to sit inside the
   wrapper object, so formatting a cell would return a +2-space edit on every line. This is gated on
   issue #15 §5.7 — see [Status](#status).

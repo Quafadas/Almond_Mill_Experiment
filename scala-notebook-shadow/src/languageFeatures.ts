@@ -8,9 +8,11 @@ import {
   PlainPosition,
   PlainRange,
   positionWithinSpan,
+  rangesWithinSpan,
   selectionChainWithinSpan,
   rangeWithinSpan,
   shadowEditsToCells,
+  shadowHierarchyItemToCell,
   shadowLinkToCell,
   shadowRangeToCell,
   spanLineBounds,
@@ -28,6 +30,24 @@ interface CellContext {
 
 interface RequestContext extends CellContext {
   shadowPosition: vscode.Position;
+}
+
+/** The parts of a call- or type-hierarchy item this relay has to move between files. */
+interface HierarchyItemLike {
+  name: string;
+  kind: vscode.SymbolKind;
+  uri: vscode.Uri;
+  range: vscode.Range;
+  selectionRange: vscode.Range;
+}
+
+/** Where a hierarchy item belongs in the notebook, and the span anything else it reports follows. */
+interface PlacedHierarchyItem {
+  uri: vscode.Uri;
+  range: vscode.Range;
+  selectionRange: vscode.Range;
+  /** Set when the item came out of a shadow script; undefined for an ordinary source file. */
+  span?: CellSpan;
 }
 
 /**
@@ -110,6 +130,8 @@ export class LanguageFeatureRelay
     vscode.RenameProvider,
     vscode.DocumentSymbolProvider,
     vscode.FoldingRangeProvider,
+    vscode.CallHierarchyProvider,
+    vscode.TypeHierarchyProvider,
     vscode.DocumentSemanticTokensProvider,
     vscode.Disposable
 {
@@ -1148,6 +1170,339 @@ export class LanguageFeatureRelay
       translated.push(new vscode.FoldingRange(range.start - firstLine, range.end - firstLine, range.kind));
     }
     return translated;
+  }
+
+  // ---------------------------------------------------------------- call & type hierarchy
+
+  async prepareCallHierarchy(
+    document: vscode.TextDocument,
+    position: vscode.Position,
+    token: vscode.CancellationToken
+  ): Promise<vscode.CallHierarchyItem[] | undefined> {
+    const roots = await this.prepareHierarchy<vscode.CallHierarchyItem>(
+      "vscode.prepareCallHierarchy",
+      document,
+      position,
+      token
+    );
+    return roots && this.placeable(roots, (item) => this.toCellCallItem(item));
+  }
+
+  async provideCallHierarchyIncomingCalls(
+    item: vscode.CallHierarchyItem,
+    token: vscode.CancellationToken
+  ): Promise<vscode.CallHierarchyIncomingCall[] | undefined> {
+    const source = await this.reprepareHierarchyItem("vscode.prepareCallHierarchy", item);
+    if (!source || token.isCancellationRequested) {
+      return undefined;
+    }
+
+    const calls = await this.executeHierarchyCommand<vscode.CallHierarchyIncomingCall>(
+      "vscode.provideIncomingCalls",
+      source.prepared
+    );
+    if (!calls || token.isCancellationRequested) {
+      return undefined;
+    }
+
+    const translated: vscode.CallHierarchyIncomingCall[] = [];
+    for (const call of calls) {
+      const from = this.toCellCallItem(call.from);
+      if (!from) {
+        continue;
+      }
+      // An incoming call's ranges are the call sites *inside the caller*, so they are in
+      // the caller's file and follow wherever the caller was placed.
+      translated.push(new vscode.CallHierarchyIncomingCall(from.item, this.rangesFrom(from.span, call.fromRanges)));
+    }
+    this.log.debug(() => `incomingCalls: ${calls.length} from Metals, ${translated.length} after mapping`);
+    return translated;
+  }
+
+  async provideCallHierarchyOutgoingCalls(
+    item: vscode.CallHierarchyItem,
+    token: vscode.CancellationToken
+  ): Promise<vscode.CallHierarchyOutgoingCall[] | undefined> {
+    const source = await this.reprepareHierarchyItem("vscode.prepareCallHierarchy", item);
+    if (!source || token.isCancellationRequested) {
+      return undefined;
+    }
+
+    const calls = await this.executeHierarchyCommand<vscode.CallHierarchyOutgoingCall>(
+      "vscode.provideOutgoingCalls",
+      source.prepared
+    );
+    if (!calls || token.isCancellationRequested) {
+      return undefined;
+    }
+
+    const translated: vscode.CallHierarchyOutgoingCall[] = [];
+    for (const call of calls) {
+      const to = this.toCellCallItem(call.to);
+      if (!to) {
+        continue;
+      }
+      // The other way round from an incoming call: these ranges are the call sites in the
+      // item we were asked about, not in the callee, so they follow *its* span.
+      translated.push(new vscode.CallHierarchyOutgoingCall(to.item, this.rangesFrom(source.span, call.fromRanges)));
+    }
+    this.log.debug(() => `outgoingCalls: ${calls.length} from Metals, ${translated.length} after mapping`);
+    return translated;
+  }
+
+  async prepareTypeHierarchy(
+    document: vscode.TextDocument,
+    position: vscode.Position,
+    token: vscode.CancellationToken
+  ): Promise<vscode.TypeHierarchyItem[] | undefined> {
+    const roots = await this.prepareHierarchy<vscode.TypeHierarchyItem>(
+      "vscode.prepareTypeHierarchy",
+      document,
+      position,
+      token
+    );
+    return roots && this.placeable(roots, (item) => this.toCellTypeItem(item));
+  }
+
+  async provideTypeHierarchySupertypes(
+    item: vscode.TypeHierarchyItem,
+    token: vscode.CancellationToken
+  ): Promise<vscode.TypeHierarchyItem[] | undefined> {
+    return this.relayTypeHierarchy("vscode.provideSupertypes", item, token);
+  }
+
+  async provideTypeHierarchySubtypes(
+    item: vscode.TypeHierarchyItem,
+    token: vscode.CancellationToken
+  ): Promise<vscode.TypeHierarchyItem[] | undefined> {
+    return this.relayTypeHierarchy("vscode.provideSubtypes", item, token);
+  }
+
+  /** Supertypes and subtypes differ only in which command they ask: neither carries ranges. */
+  private async relayTypeHierarchy(
+    command: string,
+    item: vscode.TypeHierarchyItem,
+    token: vscode.CancellationToken
+  ): Promise<vscode.TypeHierarchyItem[] | undefined> {
+    const source = await this.reprepareHierarchyItem("vscode.prepareTypeHierarchy", item);
+    if (!source || token.isCancellationRequested) {
+      return undefined;
+    }
+
+    const items = await this.executeHierarchyCommand<vscode.TypeHierarchyItem>(command, source.prepared);
+    if (!items || token.isCancellationRequested) {
+      return undefined;
+    }
+
+    const translated = this.placeable(items, (candidate) => this.toCellTypeItem(candidate));
+    this.log.debug(() => `${command}: ${items.length} from Metals, ${translated.length} after mapping`);
+    return translated;
+  }
+
+  /**
+   * Bootstrap either hierarchy: a deliberate user action on a cell position, answered by
+   * preparing at the matching position in the shadow.
+   */
+  private async prepareHierarchy<T>(
+    command: string,
+    document: vscode.TextDocument,
+    position: vscode.Position,
+    token: vscode.CancellationToken
+  ): Promise<T[] | undefined> {
+    const context = await this.requestContext(document, position);
+    if (!context || token.isCancellationRequested) {
+      return undefined;
+    }
+
+    // `prepare` reads the shadow's text model, creating a reference of its own if it has to,
+    // and drops it again on the way out - so the session it hands back outlives the model.
+    // Opening the shadow first keeps it alive for the calls the tree makes afterwards.
+    await this.shadowManager.ensureShadowOpen(context.state);
+    if (token.isCancellationRequested) {
+      return undefined;
+    }
+
+    return this.executeHierarchyCommand<T>(command, context.state.shadowUri, context.shadowPosition);
+  }
+
+  /**
+   * Ask Metals for the item behind one this relay handed out, so its calls or its types can
+   * be requested.
+   *
+   * The hierarchy commands only accept an item VS Code minted itself: each validates that
+   * its argument carries the session and item ids a `prepare` call stamped on it, and
+   * throws "invalid item" otherwise. Ours are rebuilt against a cell URI and carry neither,
+   * so every expansion of the tree starts by preparing the same symbol again, in the file
+   * Metals knows it by. Preparing again rather than remembering the original item is also
+   * what keeps a tree usable while the notebook is edited: it picks up a shadow rewritten
+   * since the tree was opened, and VS Code keeps only ten prepare sessions alive, answering
+   * nothing at all for an item whose session it has since dropped.
+   *
+   * An item in an ordinary source file - a caller elsewhere in the project, a library class -
+   * is prepared where it is. Only cell items are routed through a shadow.
+   */
+  private async reprepareHierarchyItem<T extends HierarchyItemLike>(
+    command: string,
+    item: T
+  ): Promise<{ prepared: T; span?: CellSpan } | undefined> {
+    let uri = item.uri;
+    let position = item.selectionRange.start;
+    let span: CellSpan | undefined;
+
+    const state = this.shadowManager.getStateForCellUri(item.uri);
+    if (state) {
+      await this.shadowManager.synchronizeForLanguageFeature(state.notebook);
+      span = state.mapping.spans.find((candidate) => candidate.cellUri.toString() === item.uri.toString());
+      if (!span) {
+        // The cell has been deleted, or emptied of Scala, since the tree was opened.
+        return undefined;
+      }
+      await this.shadowManager.ensureShadowOpen(state);
+      uri = state.shadowUri;
+      position = vscodePosition(cellPositionToShadow(span, plainPosition(item.selectionRange.start)));
+    } else if (this.isGeneratedCode(item.uri)) {
+      // Never handed out, so this is defensive: a stale item must not send a request - or
+      // the user - into generated code.
+      return undefined;
+    }
+
+    const prepared = await this.executeHierarchyCommand<T>(command, uri, position);
+    if (!prepared || prepared.length === 0) {
+      this.log.debug(
+        () => `${command}: nothing to expand for "${item.name}" at ${position.line}:${position.character}`
+      );
+      return undefined;
+    }
+
+    // Normally exactly one; if a position prepares several, take the one we were asked
+    // about. A prepare that names something else is not expanded at all: the position is
+    // then not the symbol's own, which is the case for a synthesized `resN_M` binding
+    // re-homed to the start of its cell, and expanding whatever is written there would
+    // answer confidently about a symbol the user never clicked.
+    const match =
+      prepared.find((candidate) => candidate.name === item.name && candidate.kind === item.kind) ??
+      prepared.find((candidate) => candidate.name === item.name);
+    if (!match) {
+      this.log.debug(
+        () => `${command}: ${prepared.length} item(s) at ${position.line}:${position.character}, none named "${item.name}"`
+      );
+      return undefined;
+    }
+    return { prepared: match, span };
+  }
+
+  /**
+   * A hierarchy command, with its failure logged rather than swallowed. These reject when
+   * VS Code cannot get a text model for the URI, which a source Metals decodes on demand
+   * can hit, and a rejection from a provider is invisible everywhere else.
+   */
+  private async executeHierarchyCommand<T>(command: string, ...args: unknown[]): Promise<T[] | undefined> {
+    try {
+      return await vscode.commands.executeCommand<T[]>(command, ...args);
+    } catch (error) {
+      this.log.error(`${command} failed: ${describeError(error)}`);
+      this.log.debug(() => errorStack(error));
+      return undefined;
+    }
+  }
+
+  /** Keep the items that can be shown in the notebook, translated; drop the rest. */
+  private placeable<T>(items: readonly T[], place: (item: T) => { item: T } | undefined): T[] {
+    const kept: T[] = [];
+    for (const item of items) {
+      const placed = place(item);
+      if (placed) {
+        kept.push(placed.item);
+      }
+    }
+    return kept;
+  }
+
+  private toCellCallItem(
+    item: vscode.CallHierarchyItem
+  ): { item: vscode.CallHierarchyItem; span?: CellSpan } | undefined {
+    const placed = this.placeHierarchyItem(item);
+    if (!placed) {
+      return undefined;
+    }
+    const translated = new vscode.CallHierarchyItem(
+      item.kind,
+      item.name,
+      item.detail ?? "",
+      placed.uri,
+      placed.range,
+      placed.selectionRange
+    );
+    translated.tags = item.tags;
+    return { item: translated, span: placed.span };
+  }
+
+  private toCellTypeItem(
+    item: vscode.TypeHierarchyItem
+  ): { item: vscode.TypeHierarchyItem; span?: CellSpan } | undefined {
+    const placed = this.placeHierarchyItem(item);
+    if (!placed) {
+      return undefined;
+    }
+    const translated = new vscode.TypeHierarchyItem(
+      item.kind,
+      item.name,
+      item.detail ?? "",
+      placed.uri,
+      placed.range,
+      placed.selectionRange
+    );
+    translated.tags = item.tags;
+    return { item: translated, span: placed.span };
+  }
+
+  /**
+   * Where a hierarchy item Metals reported belongs in the notebook, or undefined to drop it.
+   *
+   * The same policy as a reference, and for the same reason - every row of these trees is a
+   * place the user expects to be able to open and edit. An item in a shadow is placed in the
+   * cell that generated it; one no cell owns (the wrapper object, a redefinition scope) is
+   * dropped, as is one in scala-cli's own wrapper or in a shadow whose notebook is closed.
+   * An ordinary source file is left exactly where it is.
+   */
+  private placeHierarchyItem(item: HierarchyItemLike): PlacedHierarchyItem | undefined {
+    if (looksLikeScalaCliGeneratedSource(item.uri.fsPath)) {
+      return undefined;
+    }
+    if (!this.shadowManager.isShadowUri(item.uri)) {
+      return { uri: item.uri, range: item.range, selectionRange: item.selectionRange };
+    }
+
+    const state = this.shadowManager.getStateForShadowUri(item.uri);
+    if (!state) {
+      return undefined;
+    }
+    const placed = shadowHierarchyItemToCell(state.mapping, {
+      name: item.name,
+      range: plainRange(item.range),
+      selectionRange: plainRange(item.selectionRange),
+    });
+    if (!placed) {
+      return undefined;
+    }
+    return {
+      uri: placed.cellUri,
+      range: vscodeRange(placed.range),
+      selectionRange: vscodeRange(placed.selectionRange),
+      span: placed.span,
+    };
+  }
+
+  /**
+   * Ranges a hierarchy result reported against a file, in cell coordinates when that file
+   * was a shadow. One that reaches outside the cell is dropped rather than clamped: it sits
+   * on a synthesized line, and a call site the cell does not contain is not one to offer.
+   */
+  private rangesFrom(span: CellSpan | undefined, ranges: readonly vscode.Range[]): vscode.Range[] {
+    if (!span) {
+      return [...ranges];
+    }
+    return rangesWithinSpan(span, ranges.map(plainRange)).map(vscodeRange);
   }
 
   // ---------------------------------------------------------------- semantic tokens

@@ -189,6 +189,8 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.languages.registerRenameProvider(scalaNotebookCells, languageFeatures),
     vscode.languages.registerDocumentSymbolProvider(scalaNotebookCells, languageFeatures),
     vscode.languages.registerFoldingRangeProvider(scalaNotebookCells, languageFeatures),
+    vscode.languages.registerCallHierarchyProvider(scalaNotebookCells, languageFeatures),
+    vscode.languages.registerTypeHierarchyProvider(scalaNotebookCells, languageFeatures),
 
     // Not contributed in package.json: only VS Code invokes it, applying a code action the
     // relay handed back for a Metals refactor that is computed server-side.
