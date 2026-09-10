@@ -226,6 +226,19 @@ function prelude(config: ScalaNotebookConfig): Prelude {
  */
 const MAGIC_IMPORT_LINE_RE = /^\s*import\s+\$(?:ivy|dep|repo|file|plugin|scalac|profile)\b/;
 
+/**
+ * A scala-cli `using` directive written in a cell. Almond honours these per cell, but
+ * scala-cli only reads them before any Scala code in the file - and every cell body sits
+ * inside the wrapper object, below the prelude - so left in place each one draws
+ * "Ignoring using directive found after Scala code" on a line that *is* inside a cell span,
+ * squiggling code the user wrote correctly. `hoistUsingDirective` lifts them into the
+ * header instead.
+ *
+ * Only the `//>` spelling is recognized; scala-cli's block-comment form (`slash-star-gt`)
+ * would need the scanner to know it is not inside a string, and no notebook writes it.
+ */
+const USING_DIRECTIVE_LINE_RE = /^\s*\/\/>\s*using\b/;
+
 /** One `$ivy`/`$dep`/`$repo` term: either a single backticked coordinate or a braced group. */
 const MAGIC_TERM_RE = /(\$plugin\.)?\$(ivy|dep|repo)\.\s*(?:`([^`]+)`|\{([^}]*)\})/g;
 
@@ -323,6 +336,33 @@ function collectMagicImports(line: string, into: MagicImports): boolean {
       }
     }
   }
+  return true;
+}
+
+/**
+ * If `line` is a `using` directive, record it for the header and report true so the caller
+ * comments the line out.
+ *
+ * The directive is carried across *verbatim* (only trimmed), not parsed into `mvnDeps` and
+ * `repositories`: a cell may write any directive scala-cli takes - `option`, `javaOpt`,
+ * `file`, a `dep` with several values on one line - and re-spelling one we only half
+ * understand is how a working notebook turns into an unresolvable header.
+ *
+ * Commenting the original out rather than deleting it is what keeps this free: the line
+ * stays where it is, so the cell's line count and every column before the line's end are
+ * untouched and the mapping needs no adjustment (the same reason `import $ivy` is handled
+ * this way). A directive line is a line comment to the scanner either way, so statement
+ * segmentation and the `resN_M` indices do not shift either.
+ *
+ * `scanned` is the scan of the line as the user wrote it, and a line the scanner says
+ * carries code is refused: a `//> using` inside a `"""..."""` is string content, which
+ * scala-cli does not read as a directive and which commenting out would silently rewrite.
+ */
+function hoistUsingDirective(line: string, scanned: ScannedLine, into: string[]): boolean {
+  if (!scanned.blank || !USING_DIRECTIVE_LINE_RE.test(line)) {
+    return false;
+  }
+  into.push(line.trim());
   return true;
 }
 
@@ -487,14 +527,26 @@ function directiveValue(value: string): string {
  * The script's `//> using` directives: one per line, and no `deps:`-style grouping, so each
  * dependency is its own directive rather than an item under a key. That holds for the
  * `-Wconf`s too: scala-cli takes one `option` value per directive.
+ *
+ * `cellDirectives` are the ones lifted out of the first cell (see `hoistUsingDirective`),
+ * emitted last and verbatim. Ordering carries no meaning to scala-cli, which reads the
+ * whole header before resolving anything; last is simply where they read as the notebook's
+ * own additions to what we generate. Identical lines are collapsed, so a coordinate a cell
+ * asks for twice - once as a directive, once as an `import $ivy` - is declared once.
  */
-function header(scalaVersion: string, repositories: string[], deps: string[]): string[] {
-  return [
+function header(
+  scalaVersion: string,
+  repositories: string[],
+  deps: string[],
+  cellDirectives: string[]
+): string[] {
+  return dedupe([
     `//> using scala ${directiveValue(scalaVersion)}`,
     ...repositories.map((repository) => `//> using repository ${directiveValue(repository)}`),
     ...deps.map((dep) => `//> using dep ${directiveValue(dep)}`),
     ...SUPPRESSED_WARNINGS.map((wconf) => `//> using option ${directiveValue(wconf)}`),
-  ];
+    ...cellDirectives,
+  ]);
 }
 
 /**
@@ -508,14 +560,26 @@ export function transform(cells: SourceCell[], config: ScalaNotebookConfig): Tra
   const codeCells = selectScalaCodeCells(cells);
 
   const magic: MagicImports = { mvnDeps: [], repositories: [] };
-  const prepared: PreparedCell[] = codeCells.map((cell) => {
+  const cellDirectives: string[] = [];
+  const prepared: PreparedCell[] = codeCells.map((cell, i) => {
     const source = realLines(cell.text);
+    // Only the first Scala code cell is the top of the script, so only its directives are
+    // hoisted. A directive in a later cell is left alone: it is already below code Almond
+    // has compiled, so scala-cli's "ignored" warning is telling the truth about it, and
+    // hiding the warning without honouring the directive would be worse than either.
+    // Scanned before rewriting, so `hoistUsingDirective` sees the line the user wrote.
+    const scanned = i === 0 ? scanLines(source) : undefined;
     return {
       source,
       // Statements are read from the *original* text: Almond counts an `import $ivy` line as a
       // statement, so segmenting the rewritten (commented-out) lines would shift every M index.
       segments: segmentStatements(source),
-      rewritten: source.map((line) => (collectMagicImports(line, magic) ? commentOut(line) : line)),
+      rewritten: source.map((line, lineIndex) =>
+        collectMagicImports(line, magic) ||
+        (scanned !== undefined && hoistUsingDirective(line, scanned[lineIndex], cellDirectives))
+          ? commentOut(line)
+          : line
+      ),
     };
   });
   const predef = prelude(config);
@@ -525,7 +589,7 @@ export function transform(cells: SourceCell[], config: ScalaNotebookConfig): Tra
   const allDeps = dedupe([...predef.mvnDeps, ...config.mvnDeps, ...magic.mvnDeps]);
   const repositories = dedupe([...predef.repositories, ...magic.repositories]);
 
-  const directives = header(config.scalaVersion, repositories, allDeps);
+  const directives = header(config.scalaVersion, repositories, allDeps, cellDirectives);
 
   const outLines: string[] = [...directives, `object ${wrapperObjectName(config)} {`, ...preamble];
   const headerLines = outLines.length;

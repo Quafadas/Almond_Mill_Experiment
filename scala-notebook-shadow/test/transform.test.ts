@@ -621,6 +621,117 @@ test("$ivy coordinates from cells become deps, deduplicated", () => {
   assert.equal(text.split("//> using dep com.lihaoyi::upickle:4.0.2").length - 1, 1);
 });
 
+/**
+ * `using` directives written in a cell. scala-cli reads a directive only above the file's
+ * Scala code, and every cell body sits inside the wrapper object below the prelude, so a
+ * directive left where the user typed it is both ignored and reported - on a line inside
+ * the cell span, which is what put "Ignoring using directive found after Scala code" in
+ * front of the user.
+ */
+test("a using directive in the first cell is hoisted into the header", () => {
+  const cells = [cell(0, "//> using dep com.lihaoyi::os-lib:0.11.3\n\nval pwd = os.pwd\n")];
+  const { text } = transform(cells, baseConfig);
+
+  const directives = text.split("\n").filter((line) => line.startsWith("//>"));
+  assert.ok(
+    directives.includes("//> using dep com.lihaoyi::os-lib:0.11.3"),
+    `hoisted into the header, got ${JSON.stringify(directives)}`
+  );
+  // Above the wrapper and the prelude, which is the whole point: below either one it is
+  // "after Scala code".
+  assert.ok(text.indexOf("//> using dep com.lihaoyi::os-lib:0.11.3") < text.indexOf("object "));
+});
+
+test("the hoisted directive is commented out in place, shifting no line and no column", () => {
+  const cells = [cell(0, "  //> using dep com.lihaoyi::os-lib:0.11.3\nval pwd = os.pwd\n")];
+  const { text, mapping } = transform(cells, baseConfig);
+  const lines = text.split("\n");
+  const span = mapping.spans[0];
+
+  // Commented out, so scala-cli no longer reads it as a directive here and stops warning.
+  assert.equal(lines[span.startLine], "/* [shadow]   //> using dep com.lihaoyi::os-lib:0.11.3 */");
+  // Still one shadow line per cell line: the cell keeps its own line numbers.
+  assert.equal(span.lineCount, 2);
+  assert.equal(lines[span.startLine + 1], "val pwd = os.pwd");
+  assertColumnsPreserved(cells, text, mapping);
+});
+
+test("hoisting a directive does not shift the cell's resN_M numbering", () => {
+  // A directive line is a comment to the scanner either way, so it is not a statement and
+  // the trailing expression stays statement 1 - the same index it has without the hoist.
+  const withDirective = transform([cell(0, "//> using dep com.lihaoyi::os-lib:0.11.3\nval p = os.pwd\np.toString\n")], baseConfig);
+  const withComment = transform([cell(0, "// just a comment\nval p = os.pwd\np.toString\n")], baseConfig);
+
+  assert.ok(withDirective.text.includes("val p = os.pwd ; val res1_1 = ("));
+  assert.ok(withComment.text.includes("val p = os.pwd ; val res1_1 = ("));
+});
+
+test("any directive the first cell writes is carried across verbatim", () => {
+  // Not re-spelled through mvnDeps/repositories: a cell may write any directive scala-cli
+  // takes, including several values on one line, and only some are dependencies.
+  const cells = [
+    cell(0, '//> using option -deprecation\n//> using dep com.lihaoyi::os-lib:0.11.3 com.lihaoyi::upickle:4.0.2\n//> using javaOpt -Xmx2g\nval x = 1\n'),
+  ];
+  const { text } = transform(cells, baseConfig);
+
+  assert.ok(text.includes("//> using option -deprecation\n"));
+  assert.ok(text.includes("//> using dep com.lihaoyi::os-lib:0.11.3 com.lihaoyi::upickle:4.0.2\n"));
+  assert.ok(text.includes("//> using javaOpt -Xmx2g\n"));
+});
+
+test("a directive duplicating one we generate is declared once", () => {
+  const cells = [cell(0, "import $ivy.`com.lihaoyi::os-lib:0.11.3`\n//> using dep com.lihaoyi::os-lib:0.11.3\nval x = 1\n")];
+  const { text } = transform(cells, baseConfig);
+  const directives = text.split("\n").filter((line) => line.startsWith("//>"));
+
+  assert.equal(
+    directives.filter((d) => d === "//> using dep com.lihaoyi::os-lib:0.11.3").length,
+    1,
+    `declared once, got ${JSON.stringify(directives)}`
+  );
+});
+
+test("a directive-looking line inside a triple-quoted string is left alone", () => {
+  // It is string content, not a directive: scala-cli does not read it as one, and
+  // commenting it out would change the value of the string.
+  const cells = [cell(0, 'val script = """\n//> using dep com.lihaoyi::os-lib:0.11.3\nprintln(1)\n"""\n')];
+  const { text, mapping } = transform(cells, baseConfig);
+  const lines = text.split("\n");
+
+  assert.equal(lines[mapping.spans[0].startLine + 1], "//> using dep com.lihaoyi::os-lib:0.11.3");
+  const header = lines.slice(0, lines.findIndex((line) => line.startsWith("object ")));
+  assert.ok(
+    !header.includes("//> using dep com.lihaoyi::os-lib:0.11.3"),
+    `not lifted into the header, got ${JSON.stringify(header)}`
+  );
+});
+
+test("a directive in a later cell is left exactly as the user wrote it", () => {
+  // It sits below code Almond has already compiled, so scala-cli's "ignored" warning is
+  // true of it; hoisting it would make the shadow disagree with the kernel, and commenting
+  // it out would hide the warning without honouring the directive.
+  const cells = [cell(0, "val x = 1\n"), cell(1, "//> using dep com.lihaoyi::os-lib:0.11.3\nval y = 2\n")];
+  const { text, mapping } = transform(cells, baseConfig);
+  const lines = text.split("\n");
+
+  assert.equal(lines[mapping.spans[1].startLine], "//> using dep com.lihaoyi::os-lib:0.11.3");
+  const header = lines.slice(0, lines.findIndex((line) => line.startsWith("object ")));
+  assert.ok(
+    !header.includes("//> using dep com.lihaoyi::os-lib:0.11.3"),
+    `not lifted into the header, got ${JSON.stringify(header)}`
+  );
+});
+
+test("the first cell is the first Scala code cell, not the notebook's first cell", () => {
+  const cells = [
+    cell(0, "# heading\n", { isCode: false, languageId: "markdown" }),
+    cell(1, "//> using dep com.lihaoyi::os-lib:0.11.3\nval pwd = os.pwd\n"),
+  ];
+  const { text } = transform(cells, baseConfig);
+
+  assert.ok(text.indexOf("//> using dep com.lihaoyi::os-lib:0.11.3") < text.indexOf("object "));
+});
+
 test("headerLines counts the directives, so cells still map to their own lines", () => {
   const cells = [cell(0, "val x = 1\n")];
   const { text, mapping } = transform(cells, baseConfig);
