@@ -6,7 +6,9 @@ import {
   cellPositionToShadow,
   cellRangeToShadow,
   lineToSpan,
+  minimalTextEdit,
   nearestFollowingSpan,
+  offsetToPosition,
   isAppendedColumn,
   positionWithinSpan,
   rangeWithinSpan,
@@ -368,4 +370,62 @@ test("shadowEditsToCells puts a hoisted insertion and the cell's own edits on on
 
 test("shadowEditsToCells accepts an empty edit list", () => {
   assert.deepEqual(shadowEditsToCells(makeMapping(), []), { cells: [], hoisted: 0 });
+});
+
+test("offsetToPosition counts lines and the offset into the last one", () => {
+  const text = "one\ntwo\nthree";
+  assert.deepEqual(offsetToPosition(text, 0), { line: 0, character: 0 });
+  assert.deepEqual(offsetToPosition(text, 3), { line: 0, character: 3 });
+  assert.deepEqual(offsetToPosition(text, 4), { line: 1, character: 0 });
+  assert.deepEqual(offsetToPosition(text, 10), { line: 2, character: 2 });
+  assert.deepEqual(offsetToPosition(text, text.length), { line: 2, character: 5 });
+});
+
+test("minimalTextEdit reports nothing when the text is unchanged", () => {
+  assert.equal(minimalTextEdit("val x = 1\n", "val x = 1\n"), undefined);
+});
+
+test("minimalTextEdit recovers an inferred type as an insertion", () => {
+  // What "insert inferred type" does to the shadow, and the whole point of the diff.
+  const edit = minimalTextEdit("a\nval x = 1\nb\n", "a\nval x: Int = 1\nb\n");
+  assert.deepEqual(edit, {
+    range: { start: { line: 1, character: 5 }, end: { line: 1, character: 5 } },
+    newText: ": Int",
+  });
+});
+
+test("minimalTextEdit recovers a replacement, trimmed to what actually differs", () => {
+  // The trailing " 2)" is common to both, so the range stops short of it.
+  const edit = minimalTextEdit("val x = foo(1, 2)\n", "val x = foo(a = 1, b = 2)\n");
+  assert.deepEqual(edit, {
+    range: { start: { line: 0, character: 12 }, end: { line: 0, character: 14 } },
+    newText: "a = 1, b =",
+  });
+});
+
+test("minimalTextEdit recovers a deletion", () => {
+  // "t" is common to "two" and "three", so the cut starts after it and ends after "two\nt".
+  const edit = minimalTextEdit("one\ntwo\nthree\n", "one\nthree\n");
+  assert.deepEqual(edit, {
+    range: { start: { line: 1, character: 1 }, end: { line: 2, character: 1 } },
+    newText: "",
+  });
+});
+
+test("minimalTextEdit spans every change when a command touched two places", () => {
+  // Extract-method shape: a new definition above and a rewritten call below. One range
+  // covering both is what lets shadowEditsToCells reject it if it crosses a cell boundary.
+  const edit = minimalTextEdit("head\nuse 1 + 2\ntail\n", "head\ndef m = 1 + 2\nuse m\ntail\n");
+  assert.deepEqual(edit, {
+    range: { start: { line: 1, character: 0 }, end: { line: 1, character: 9 } },
+    newText: "def m = 1 + 2\nuse m",
+  });
+});
+
+test("minimalTextEdit handles an append with no common suffix", () => {
+  const edit = minimalTextEdit("a\n", "a\nb\n");
+  assert.deepEqual(edit, {
+    range: { start: { line: 1, character: 0 }, end: { line: 1, character: 0 } },
+    newText: "b\n",
+  });
 });

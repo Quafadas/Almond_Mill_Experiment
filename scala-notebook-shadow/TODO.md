@@ -97,9 +97,16 @@
       cells after it. Only insertions are re-homed - a replacement outside every cell (Metals
       organizing the whole script's imports) would move the prelude into the user's cell, so it
       rejects and the action is not offered.
-- [x] Drop a code action backed by a server-side `command` rather than an edit. Its arguments
-      name the shadow file and shadow positions, and if it ran, its edit would land in the
-      shadow - which the next regenerate discards.
+- [x] ~~Drop a code action backed by a server-side `command` rather than an edit.~~ Superseded:
+      relay it instead. Such a command is computed server-side and pushed at the shadow with
+      `workspace/applyEdit`, so there is no edit to read - but there is a before and an after.
+      The action is offered as a command of ours, which snapshots the shadow, runs Metals'
+      command, waits for the edit to land, diffs, and re-homes the result into the cell before
+      rewriting the shadow from the notebook. `minimalTextEdit` returns the tightest range
+      covering every change, so a refactor that also touched the prelude or a neighbouring cell
+      spans them and is refused, which is the same rule the `WorkspaceEdit` path already had.
+      This is what "insert inferred type", "convert to named arguments" and "extract method"
+      needed - all three carry a command and no edit.
 - [x] Hand back an edit that touches no generated file *unchanged* rather than rebuilt: file
       creations, renames and deletions are not reachable through `WorkspaceEdit.entries()`, so
       rebuilding one would silently drop them and leave "create class in a new file" doing

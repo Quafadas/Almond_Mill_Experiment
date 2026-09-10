@@ -4,6 +4,7 @@ import {
   cellPositionToShadow,
   cellRangeToShadow,
   isAppendedColumn,
+  minimalTextEdit,
   PlainPosition,
   PlainRange,
   positionWithinSpan,
@@ -27,6 +28,28 @@ interface CellContext {
 
 interface RequestContext extends CellContext {
   shadowPosition: vscode.Position;
+}
+
+/**
+ * The command a relayed, command-backed code action is offered as. Not contributed in
+ * package.json on purpose: it is meaningless from the command palette, and only ever
+ * invoked by VS Code applying an action this extension handed back.
+ */
+export const RUN_SHADOW_COMMAND = "scalaNotebook.runShadowCodeAction";
+
+/** How long to wait for a relayed command's `workspace/applyEdit` to reach the shadow. */
+const SHADOW_EDIT_TIMEOUT_MS = 2000;
+
+/** What `RUN_SHADOW_COMMAND` needs to replay a Metals command and collect what it did. */
+export interface ShadowCommandArgs {
+  /** The cell the action was offered in - where an out-of-cell insertion is re-homed to. */
+  cellUri: string;
+  /** Metals' own command id, forwarded verbatim. */
+  command: string;
+  /** Metals' own arguments, which already name the shadow file and shadow positions. */
+  arguments: unknown[];
+  /** The action's title, for messages. */
+  title: string;
 }
 
 function plainPosition(position: vscode.Position): PlainPosition {
@@ -787,11 +810,12 @@ export class LanguageFeatureRelay
   /**
    * Turn one of Metals' code actions into one that acts on the cell, or drop it.
    *
-   * Only edit-carrying actions survive. An action backed by a *command* is computed
-   * server-side from arguments naming the shadow file and shadow positions: there is nothing
-   * to translate those into, and if it did run, its edit would land in the shadow script,
-   * which the next regenerate discards. Dropping it costs a menu entry; keeping it would
-   * offer a fix that silently does nothing.
+   * An action carrying a `WorkspaceEdit` is translated here and handed back ready to apply.
+   * An action backed by a *command* cannot be: it is computed server-side from arguments
+   * naming the shadow file and shadow positions, and there is nothing in it to read. Those
+   * are wrapped instead - the cell is offered a command of ours, which runs Metals' command
+   * and re-homes whatever it did to the shadow (see `runShadowCodeAction`). "Insert
+   * inferred type", "convert to named arguments" and "extract method" are all this shape.
    */
   private translateCodeAction(
     context: CellContext,
@@ -799,32 +823,164 @@ export class LanguageFeatureRelay
   ): vscode.CodeAction | undefined {
     if (typeof (result as vscode.Command).command === "string") {
       // A bare Command rather than a CodeAction - `executeCodeActionProvider` returns those
-      // for actions VS Code synthesized. Whatever it does, it does to the shadow script.
+      // for actions VS Code synthesized, with no kind to classify them by.
       this.log.debug(() => `codeActions: dropped bare command "${result.title}"`);
       return undefined;
     }
 
     const action = result as vscode.CodeAction;
-    if (action.command) {
-      this.log.debug(() => `codeActions: dropped command-backed "${action.title}"`);
-      return undefined;
-    }
-    if (!action.edit) {
+    if (!action.edit && !action.command) {
       // `diagnostics` and `disabled` do not survive the command bridge, so an action with
       // neither an edit nor a command has nothing left it could do here.
       return undefined;
     }
 
-    const edit = this.translateWorkspaceEdit(context.state, action.edit, context.span);
-    if (!edit) {
-      this.log.debug(() => `codeActions: dropped "${action.title}"; its edits do not fit the cell`);
-      return undefined;
+    const translated = new vscode.CodeAction(action.title, action.kind);
+    translated.isPreferred = action.isPreferred;
+
+    if (action.edit) {
+      const edit = this.translateWorkspaceEdit(context.state, action.edit, context.span);
+      if (!edit) {
+        this.log.debug(() => `codeActions: dropped "${action.title}"; its edits do not fit the cell`);
+        return undefined;
+      }
+      translated.edit = edit;
     }
 
-    const translated = new vscode.CodeAction(action.title, action.kind);
-    translated.edit = edit;
-    translated.isPreferred = action.isPreferred;
+    if (action.command) {
+      const args: ShadowCommandArgs = {
+        cellUri: context.span.cellUri.toString(),
+        command: action.command.command,
+        arguments: action.command.arguments ?? [],
+        title: action.title,
+      };
+      translated.command = { title: action.title, command: RUN_SHADOW_COMMAND, arguments: [args] };
+    }
+
     return translated;
+  }
+
+  /**
+   * Run a Metals command that a code action was backed by, and move its result into the cell.
+   *
+   * Metals computes these refactors server-side and pushes the result straight at the shadow
+   * document with `workspace/applyEdit`, so there is no edit to intercept - only a before and
+   * an after. Snapshotting the shadow, letting the command land, and diffing recovers one
+   * text edit in shadow coordinates, which is the same shape everything else here translates.
+   *
+   * The shadow is then rewritten from the notebook either way. On success that re-emits it
+   * with the cell's new text; on failure it is how the command's edit is rolled back, since
+   * a shadow left half-refactored would disagree with the cells until the next keystroke.
+   */
+  async runShadowCodeAction(args: ShadowCommandArgs): Promise<void> {
+    if (args.command === RUN_SHADOW_COMMAND) {
+      // Nothing produces this, but running ourselves would recurse until the stack gives out.
+      this.log.warn(`codeActions: refused to relay "${args.title}" to itself`);
+      return;
+    }
+
+    const state = this.shadowManager.getStateForCellUri(vscode.Uri.parse(args.cellUri));
+    if (!state) {
+      this.log.warn(`codeActions: "${args.title}" has no notebook to apply to any more`);
+      return;
+    }
+
+    // The mapping has to describe the text the command is about to edit, or the diff below
+    // would be read in the wrong coordinates. Take the span only afterwards: a sync that
+    // rewrites the shadow replaces the mapping, spans and all.
+    await this.shadowManager.synchronizeForLanguageFeature(state.notebook);
+    await this.shadowManager.ensureShadowOpen(state);
+    const span = state.mapping.spans.find((candidate) => candidate.cellUri.toString() === args.cellUri);
+    if (!span) {
+      this.log.warn(`codeActions: "${args.title}" has no cell to apply to any more`);
+      return;
+    }
+    const doc = await vscode.workspace.openTextDocument(state.shadowUri);
+    const before = doc.getText();
+
+    // Metals answers the command as soon as it has *sent* its `workspace/applyEdit`, so the
+    // edit can still be in flight when the call resolves. Subscribe before running.
+    const applied = this.nextShadowChange(state.shadowUri);
+    try {
+      await vscode.commands.executeCommand(args.command, ...args.arguments);
+    } catch (error) {
+      this.log.error(`codeActions: "${args.title}" (${args.command}) failed: ${describeError(error)}`);
+      this.log.debug(() => errorStack(error));
+      await this.rewriteShadow(state, args.title);
+      return;
+    }
+    if (doc.getText() === before) {
+      await applied;
+    }
+
+    const edit = minimalTextEdit(before, doc.getText());
+    if (!edit) {
+      // Some of Metals' commands only edit files that are not the shadow (creating a class
+      // in a new file, say). Those have already been applied where they belong.
+      this.log.debug(() => `codeActions: "${args.title}" left ${state.relativePath} unchanged`);
+      return;
+    }
+
+    const translation = shadowEditsToCells(state.mapping, [edit], span);
+    if (!translation) {
+      this.log.debug(() => `codeActions: "${args.title}" changed ${state.relativePath} outside the cell`);
+      await this.rewriteShadow(state, args.title);
+      void vscode.window.showWarningMessage(
+        `"${args.title}" changed generated code outside the cell, so it was not applied.`
+      );
+      return;
+    }
+
+    const cellEdit = new vscode.WorkspaceEdit();
+    for (const cell of translation.cells) {
+      cellEdit.set(
+        cell.cellUri,
+        cell.edits.map((one) => vscode.TextEdit.replace(vscodeRange(one.range), one.newText))
+      );
+    }
+    await vscode.workspace.applyEdit(cellEdit);
+
+    // Only now, so the shadow goes from the command's text straight to the text the edited
+    // cells generate - one rewrite and one compile rather than a revert and a redo. The
+    // debounced regenerate the cell edit queued then finds nothing to do.
+    await this.rewriteShadow(state, args.title);
+    this.log.debug(
+      () => `codeActions: applied "${args.title}" to ${translation.cells.length} cell(s), ${translation.hoisted} hoisted`
+    );
+  }
+
+  /**
+   * Resolves on the shadow's next content change, or after `SHADOW_EDIT_TIMEOUT_MS` if the
+   * command turns out not to touch it at all - there is no signal that says "nothing coming".
+   */
+  private nextShadowChange(shadowUri: vscode.Uri): Promise<void> {
+    return new Promise((resolve) => {
+      const finish = (): void => {
+        clearTimeout(timer);
+        subscription.dispose();
+        resolve();
+      };
+      const timer = setTimeout(finish, SHADOW_EDIT_TIMEOUT_MS);
+      const subscription = vscode.workspace.onDidChangeTextDocument((event) => {
+        if (event.contentChanges.length > 0 && event.document.uri.toString() === shadowUri.toString()) {
+          finish();
+        }
+      });
+    });
+  }
+
+  /**
+   * Put the shadow back in step with the notebook after a relayed command touched it. Forced,
+   * because the text the command wrote is what has to be overwritten - the unchanged-text
+   * short-circuit compares against what the extension last wrote, not what is in the document.
+   */
+  private async rewriteShadow(state: ShadowState, title: string): Promise<void> {
+    try {
+      await this.shadowManager.regenerate(state.notebook, true);
+    } catch (error) {
+      this.log.error(`codeActions: could not rewrite ${state.relativePath} after "${title}": ${describeError(error)}`);
+      this.log.debug(() => errorStack(error));
+    }
   }
 
   // ---------------------------------------------------------------- rename

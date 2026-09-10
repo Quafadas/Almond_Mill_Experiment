@@ -392,3 +392,50 @@ export function shadowEditsToCells(
 
   return { cells: [...byCell.values()], hoisted };
 }
+
+/** The line/character of a string offset, counting `\n` (a `\r` stays part of the line). */
+export function offsetToPosition(text: string, offset: number): PlainPosition {
+  let line = 0;
+  let lineStart = 0;
+  for (let i = 0; i < offset; i += 1) {
+    if (text.charCodeAt(i) === 10) {
+      line += 1;
+      lineStart = i + 1;
+    }
+  }
+  return { line, character: offset - lineStart };
+}
+
+/**
+ * The single replacement that turns `before` into `after`, in `before`'s coordinates, or
+ * undefined if they are already equal.
+ *
+ * Used to recover what a Metals *command* did: the command applies its edit straight to the
+ * shadow document, so all we have afterwards is the two texts. Trimming the common prefix
+ * and suffix gives the tightest range that covers every change, which is what makes the
+ * result safe to hand to `shadowEditsToCells` - a refactor that also touched the prelude or
+ * a neighbouring cell yields a range spanning them, and is rejected rather than mangled.
+ */
+export function minimalTextEdit(before: string, after: string): PlainTextEdit | undefined {
+  if (before === after) {
+    return undefined;
+  }
+
+  let start = 0;
+  const shortest = Math.min(before.length, after.length);
+  while (start < shortest && before.charCodeAt(start) === after.charCodeAt(start)) {
+    start += 1;
+  }
+
+  let endBefore = before.length;
+  let endAfter = after.length;
+  while (endBefore > start && endAfter > start && before.charCodeAt(endBefore - 1) === after.charCodeAt(endAfter - 1)) {
+    endBefore -= 1;
+    endAfter -= 1;
+  }
+
+  return {
+    range: { start: offsetToPosition(before, start), end: offsetToPosition(before, endBefore) },
+    newText: after.slice(start, endAfter),
+  };
+}
