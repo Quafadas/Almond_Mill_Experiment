@@ -24,6 +24,18 @@ import { createHash } from "node:crypto";
  *
  * Names must stay short enough to compile. See {@link MAX_BASE_NAME_LENGTH}.
  */
+/**
+ * scala-cli's Metals integration keys off `.sc` specifically: a `.scala` file in the same
+ * directory would be read as an ordinary source rather than a script, and would not get the
+ * dedicated scala-cli build server the whole approach rests on.
+ */
+export const SHADOW_FILE_EXTENSION = ".sc";
+
+/** The file name a notebook at `relativePath` within the workspace folder shadows to. */
+export function shadowFileName(relativePath: string): string {
+  return `${shadowBaseName(relativePath)}${SHADOW_FILE_EXTENSION}`;
+}
+
 export function shadowBaseName(relativePath: string): string {
   // Normalized first so a repo opened on Windows and on macOS derives the same name for
   // the same notebook, rather than one per separator style.
