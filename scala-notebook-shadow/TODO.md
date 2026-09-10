@@ -144,6 +144,50 @@
       scalafmt breaks an appended `val resN_M = (` off its cell-marker line. So it is a
       second `//> using option -Wconf`, beside the pure-expression one. An actually missing
       `}` still fails to parse and reports on its own.
+- [x] Hoist a `//> using` directive written in the first cell into the shadow's header.
+      Almond honours a directive per cell, but scala-cli reads one only above the file's
+      Scala code - and every cell body sits inside the wrapper object, below the prelude -
+      so the directive was both ignored and reported: "Ignoring using directive found after
+      Scala code", on a line that *is* inside a cell span, so unlike the header warnings it
+      reached the cell as a squiggle on code the user wrote correctly. Measured with
+      scala-cli 1.16.0: a `//> using dep` left in place costs the warning *and* the
+      dependency (`Not found: os`); hoisted, the same script compiles clean. The line is
+      commented out in place rather than deleted, the way `import $ivy` already is, so the
+      cell keeps its line count and every column before the line's end and the mapping needs
+      no adjustment - a directive line is a line comment to the scanner either way, so
+      statement segmentation and the `resN_M` indices do not move either. Directives are
+      carried across verbatim rather than re-spelled through `mvnDeps`/`repositories`,
+      since a cell may write any directive scala-cli takes (`option`, `javaOpt`, `file`, a
+      `dep` with several values on one line) and only some are dependencies; identical
+      header lines are collapsed, so a coordinate asked for twice - once as a directive,
+      once as an `import $ivy` - is declared once. A directive in a *later* cell is left
+      untouched: it already sits below code, so the warning is telling the truth about it,
+      and commenting it out would hide the warning without honouring the directive. A line
+      the scanner says carries code is refused, so a `//> using` inside a `"""..."""` stays
+      string content - scala-cli does not read it as a directive, and commenting it out
+      would rewrite the string's value. `import $ivy` has the same exposure and no such
+      guard; it has always been there, and is left as it is.
+- [ ] Suppress scala-cli's "Using directives detected in multiple files" warning, and the
+      "dependency is outdated" hint beside it. Every shadow carries its own `//> using`
+      header and they all sit in one directory, which scala-cli reads as one project, so it
+      warns once per shadow and names each of them. Measured with scala-cli 1.16.0: there is
+      no directive-level escape - `//> using suppressWarning directives-in-multiple-files`
+      is rejected as unrecognized - and the only two levers are a generated `project.scala`
+      or the machine-global `scala-cli config suppress-warning.directives-in-multiple-files`
+      (which also has to be true of whatever scala-cli Metals embeds, untested). So:
+      `project.scala` in the shadow directory holds the scala version, the repositories, the
+      deps and the `-Wconf`s, and the `.sc` files carry no header at all. Confirmed that both
+      deps and `-Wconf` options reach a nested `.sc` from a `project.scala` at either the
+      project root or the sources' own directory. The `$ivy` deps are the hard part: scala-cli
+      already merges every file's directives into one classpath, so centralizing them changes
+      nothing - but they have to be the union over every `.sc` in the directory, not just the
+      open notebooks', or a closed notebook's shadow loses its deps and its errors poison the
+      shared target. No new bookkeeping is needed for that: the emitter already writes each
+      magic import back into the `.sc` as a commented-out ``import $ivy`` line, so the union can
+      be rebuilt by scanning the sibling scripts and re-running `collectMagicImports`, which
+      also drops a deleted shadow's deps on its own. Left undone for now because none of these
+      reach a cell - they report on line 1 of the shadow, outside every span, so the relay
+      already drops them and they only show up in the Problems panel and Metals' build output.
 - [ ] Suppress or rewrite hover text that exposes synthesized machinery (`resN_M` result
       names, the wrapper/nesting objects in an owner path).
 - [ ] Translate inlay-hint label links that point into the shadow script back to the defining
@@ -192,6 +236,12 @@
       whose first line is indented is still emitted verbatim.
 - [x] Unit-test that scala-cli's `.scala-build/` wrappers are recognised, so generated code is
       never offered as a reference or an inlay-hint link.
+- [x] Unit-test `//> using` hoisting: a first-cell directive reaching the header above the
+      wrapper, the original commented out in place with its line count and columns intact,
+      the `resN_M` indices unmoved, verbatim carry-across of directives that are not deps,
+      collapsing a duplicate of a generated directive, a later cell's directive left alone,
+      and "first cell" meaning the first Scala *code* cell rather than the notebook's first.
+      Also that a directive-looking line inside a triple-quoted string is left alone.
 - [x] Unit-test shadow-to-cell edit translation: in-cell edits, grouping by cell, an edit
       crossing a cell boundary, an out-of-cell insertion with and without somewhere to re-home
       it, and the refusal to re-home a replacement.
