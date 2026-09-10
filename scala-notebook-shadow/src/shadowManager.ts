@@ -1,7 +1,8 @@
 import * as path from "path";
 import * as vscode from "vscode";
 import { Logger, LogLevel } from "./log";
-import { shadowBaseName } from "./shadowNaming";
+import { looksGenerated, orphanedShadowNames } from "./shadowCleanup";
+import { shadowBaseName, SHADOW_FILE_EXTENSION } from "./shadowNaming";
 import { ScalaNotebookConfig, ShadowMapping, SourceCell, transform } from "./transform";
 
 export interface ExtensionConfig extends ScalaNotebookConfig {
@@ -12,13 +13,6 @@ export interface ExtensionConfig extends ScalaNotebookConfig {
   debounceMs: number;
   compileOnSave: boolean;
 }
-
-/**
- * scala-cli's Metals integration keys off `.sc` specifically: a `.scala` file in the same
- * directory would be read as an ordinary source rather than a script, and would not get the
- * dedicated scala-cli build server the whole approach rests on.
- */
-const SHADOW_FILE_EXTENSION = ".sc";
 
 /**
  * Every shadow operation is started from an event handler or a timer with nothing waiting
@@ -37,6 +31,14 @@ function errorStack(error: unknown): string {
 
 /** What a shadow written by the previous, Mill-targeted version of the extension was called. */
 const LEGACY_MILL_SHADOW_EXTENSION = ".scala";
+
+/**
+ * Directories the sweep for notebooks skips: expensive to walk, and a notebook found in one
+ * would never have been shadowed anyway. Passing any exclude replaces VS Code's default
+ * excludes, which is deliberate - a notebook the user has merely hidden from search still
+ * has a shadow, and must not be read as a deleted one.
+ */
+const NOTEBOOK_SEARCH_EXCLUDE = "**/{node_modules,.git,.metals,.bloop,.scala-build,.ipynb_checkpoints}/**";
 
 export interface ShadowState {
   notebook: vscode.NotebookDocument;
@@ -206,6 +208,79 @@ export class ShadowManager implements vscode.Disposable {
       `${stale.fsPath} is left over from the Mill version of this extension and still defines ` +
         `object ${baseName}. Delete it, or expect duplicate-definition errors on every cell.`
     );
+  }
+
+  /**
+   * Delete the shadow scripts that no notebook maps to, across every workspace folder.
+   *
+   * Run once, after the notebooks already open have been adopted: an untitled notebook has
+   * no path for the search for `.ipynb` files to find, so its shadow is only accounted for
+   * by `isShadowUri`, and that only answers once the notebook is adopted. A notebook opened
+   * while the sweep runs is covered by the same check, repeated before each delete.
+   *
+   * What counts as a leftover, and why one is worth removing, is shadowCleanup.ts.
+   */
+  async cleanOrphanedShadows(): Promise<void> {
+    const shadowDir = this.getConfig().shadowDir;
+    for (const folder of vscode.workspace.workspaceFolders ?? []) {
+      try {
+        await this.cleanFolder(folder, shadowDir);
+      } catch (error) {
+        this.log.error(`Failed to clean ${folder.name}/${shadowDir}: ${describeError(error)}`);
+        this.log.debug(() => errorStack(error));
+      }
+    }
+  }
+
+  private async cleanFolder(folder: vscode.WorkspaceFolder, shadowDir: string): Promise<void> {
+    const directory = vscode.Uri.joinPath(folder.uri, shadowDir);
+    let entries: [string, vscode.FileType][];
+    try {
+      entries = await vscode.workspace.fs.readDirectory(directory);
+    } catch {
+      // No shadow directory yet; the first notebook to open creates it.
+      return;
+    }
+
+    const fileNames = entries.filter(([, type]) => (type & vscode.FileType.File) !== 0).map(([name]) => name);
+    // Worth checking before paying for a workspace-wide search for notebooks.
+    if (!fileNames.some((name) => name.endsWith(SHADOW_FILE_EXTENSION))) {
+      return;
+    }
+
+    const notebooks = await vscode.workspace.findFiles(
+      new vscode.RelativePattern(folder, "**/*.ipynb"),
+      NOTEBOOK_SEARCH_EXCLUDE
+    );
+    const orphans = orphanedShadowNames(
+      fileNames,
+      notebooks.map((uri) => path.relative(folder.uri.fsPath, uri.fsPath))
+    );
+
+    const deleted: string[] = [];
+    for (const name of orphans) {
+      const uri = vscode.Uri.joinPath(directory, name);
+      if (this.isShadowUri(uri)) {
+        continue;
+      }
+      try {
+        const text = Buffer.from(await vscode.workspace.fs.readFile(uri)).toString("utf8");
+        if (!looksGenerated(text)) {
+          this.log.info(`Kept ${name}: no notebook matches its name, but it is not a generated shadow.`);
+          continue;
+        }
+        await vscode.workspace.fs.delete(uri);
+        deleted.push(name);
+      } catch (error) {
+        this.log.warn(`Could not remove the stale shadow ${name}: ${describeError(error)}`);
+      }
+    }
+
+    if (deleted.length > 0) {
+      this.log.info(
+        `Removed ${deleted.length} shadow script(s) from ${shadowDir} whose notebooks are gone: ${deleted.join(", ")}`
+      );
+    }
   }
 
   /**

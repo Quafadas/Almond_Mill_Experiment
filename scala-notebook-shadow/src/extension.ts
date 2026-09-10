@@ -65,9 +65,13 @@ export function activate(context: vscode.ExtensionContext): void {
   log.info(`Activated (log level ${logLevel}); use "Scala Notebook: Show Log" to reopen this channel.`);
 
   // Pick up notebooks already open when the extension activates.
-  for (const notebook of vscode.workspace.notebookDocuments) {
-    void shadowManager.openForNotebook(notebook);
-  }
+  const initialOpens = Promise.all(
+    vscode.workspace.notebookDocuments.map((notebook) => shadowManager.openForNotebook(notebook))
+  );
+
+  // ... then sweep out the shadows left behind by notebooks that are gone. After the opens,
+  // not alongside them: see ShadowManager.cleanOrphanedShadows.
+  void initialOpens.then(() => shadowManager.cleanOrphanedShadows());
 
   /**
    * Semantic highlighting has to be registered with the *server's* token legend, and the

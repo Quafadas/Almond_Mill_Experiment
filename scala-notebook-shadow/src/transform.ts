@@ -70,6 +70,15 @@ export interface TransformResult {
 const DEFAULT_WRAPPER_OBJECT_NAME = "NotebookCells";
 
 /**
+ * Opens the comment that precedes every cell body in a shadow file.
+ *
+ * Exported because it is the only thing that distinguishes a shadow script from any other
+ * `.sc` a user might keep in the shadow directory, which is what
+ * `looksGenerated` in shadowCleanup.ts reads it for.
+ */
+export const CELL_MARKER_PREFIX = "/* --- cell ";
+
+/**
  * Almond wraps each cell in an object, where a bare statement is simply part of the
  * template body; we wrap for the same reason, and additionally because the wrapper is what
  * the redefinition-nesting scheme nests into (see `planScopes`) and what keeps two
@@ -604,7 +613,7 @@ export function transform(cells: SourceCell[], config: ScalaNotebookConfig): Tra
       openScopes += 1;
       outLines.push(`object \`${SCOPE_OBJECT_PREFIX}${openScopes}\` {`);
     }
-    outLines.push(`/* --- cell ${cell.index} ${cell.uri.fragment} */${bindings.openers.get(-1) ?? ""}`);
+    outLines.push(`${CELL_MARKER_PREFIX}${cell.index} ${cell.uri.fragment} */${bindings.openers.get(-1) ?? ""}`);
     const startLine = outLines.length;
     lines.forEach((line, lineIndex) => {
       // Order matters: a line can close one statement and open the next.
