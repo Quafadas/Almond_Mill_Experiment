@@ -206,6 +206,27 @@ test("ammoniteVersion adds the Ammonite API dependency and the repl/interp bridg
   ]);
 });
 
+test("projectRootPath adds a projectRoot(relative) helper resolving against it, not the shadow's own directory", () => {
+  const cells = [cell(0, 'projectRoot("resources/aCsv.csv")\n')];
+  const { text, mapping } = transform(cells, { ...baseConfig, projectRootPath: "/workspace/repo" });
+  const lines = text.split("\n");
+
+  const openIndex = lines.indexOf("object NotebookCells {");
+  const preludeLines = lines.slice(openIndex + 1, mapping.headerLines);
+  assert.equal(preludeLines.length, 1);
+  assert.ok(preludeLines[0].startsWith("def projectRoot(relative: String = \"\"): java.nio.file.Path"));
+  assert.ok(preludeLines[0].includes('java.nio.file.Paths.get("/workspace/repo")'));
+
+  // No dependency is required: the helper only needs the JDK.
+  assert.ok(!text.includes("//> using dep"));
+});
+
+test("projectRootPath is left out of the preamble when unset", () => {
+  const cells = [cell(0, "val x = 1\n")];
+  const { text } = transform(cells, baseConfig);
+  assert.ok(!text.includes("projectRoot"));
+});
+
 test("the prelude is left out when unset, and the configured preamble follows it", () => {
   const cells = [cell(0, "val x = 1\n")];
   const off = transform(cells, { ...baseConfig, preamble: ["val predefN = 2"] });

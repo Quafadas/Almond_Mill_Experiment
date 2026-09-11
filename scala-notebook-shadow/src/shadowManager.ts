@@ -329,6 +329,7 @@ export class ShadowManager implements vscode.Disposable {
     const { text, mapping } = transform(this.toSourceCells(notebook), {
       ...config,
       wrapperObjectName: baseName,
+      projectRootPath: folder.uri.fsPath,
     });
 
     let existed = true;
@@ -410,9 +411,11 @@ export class ShadowManager implements vscode.Disposable {
     }
 
     const config = this.getConfig();
+    const folder = this.workspaceFolder(notebook);
     const { text, mapping } = transform(this.toSourceCells(notebook), {
       ...config,
       wrapperObjectName: state.wrapperObjectName,
+      projectRootPath: folder?.uri.fsPath,
     });
 
     if (!force && text === state.appliedText) {

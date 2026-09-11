@@ -322,6 +322,17 @@ One useful side effect: `ammonite-repl-api` brings os-lib, pprint and fansi onto
 cell can use `os.pwd` or `pprint.Tree` with no `import $ivy` — which is what happens in a real
 kernel too, since Ammonite puts its own classpath in scope there.
 
+**`projectRoot`.** The shadow always sits in `scalaNotebook.shadowDir`, not next to the notebook that
+generated it — Metals' own scala-cli build server compiles that one directory, and only that one
+([#25](https://github.com/Quafadas/Almond_Mill_Experiment/issues/25)) — so a cell that finds a
+resource by navigating from `os.pwd` or the script's own location resolves a different path in the
+shadow than a real kernel run would resolve for the same cell. The preamble adds a
+`projectRoot(relative: String = ""): java.nio.file.Path` helper instead, resolving `relative` against
+the workspace folder itself, baked in as an absolute path when the shadow is (re)generated. A real
+kernel run ordinarily starts with that same folder as its working directory, so
+`projectRoot("resources/aCsv.csv")` resolves to the same file either way. It depends on nothing
+beyond the JDK, so it is always added, regardless of `ammoniteVersion`/`almondVersion`.
+
 ## Settings
 
 | Setting | Type | Default | Notes |

@@ -34,6 +34,15 @@ export interface ScalaNotebookConfig {
    * name so two shadow files sharing a Metals build target can't collide.
    */
   wrapperObjectName?: string;
+  /**
+   * Absolute path of the workspace folder the notebook lives under. ShadowManager passes
+   * `folder.uri.fsPath` (see `createShadow`). When set, a `projectRoot` helper is added to
+   * the preamble (see `projectRootPrelude`) so a cell can resolve a path such as
+   * `"resources/aCsv.csv"` against the project root rather than against wherever the
+   * shadow happens to sit - since scala-cli's own build server, not Mill, now compiles it,
+   * the shadow's directory is no longer the notebook's own (issue #25).
+   */
+  projectRootPath?: string;
 }
 
 /** A minimal, decoupled view of a notebook cell used as transform input. */
@@ -224,7 +233,36 @@ function prelude(config: ScalaNotebookConfig): Prelude {
     result.preamble.push(...ALMOND_PRELUDE);
   }
 
+  const projectRootPath = config.projectRootPath?.trim();
+  if (projectRootPath) {
+    result.preamble.push(...projectRootPrelude(projectRootPath));
+  }
+
   return result;
+}
+
+/**
+ * A `projectRoot(relative)` helper, resolving `relative` against the notebook's workspace
+ * folder rather than against the shadow's own directory (see `ScalaNotebookConfig.projectRootPath`).
+ *
+ * A cell reading a file next to the notebook used to be able to get there by walking up from
+ * the script's own location; now that scala-cli's build server compiles only the shadow
+ * directory, that location is `notebook-shadow/`, not the notebook's (issue #25). Baking the
+ * workspace folder's path in at generation time sidesteps that: both a real kernel run - whose
+ * working directory is wherever it was launched, ordinarily the workspace root - and this
+ * shadow resolve the same absolute path for the same relative one, as long as a cell that
+ * wants a path uses `projectRoot(...)` rather than navigating from `os.pwd` or the script's
+ * own location.
+ *
+ * Depends on nothing beyond the JDK, so it type-checks whether or not `mvnDeps`/`ammoniteVersion`
+ * pulls in os-lib.
+ */
+function projectRootPrelude(projectRootPath: string): string[] {
+  return [
+    `def projectRoot(relative: String = ""): java.nio.file.Path = { val root = java.nio.file.Paths.get(${JSON.stringify(
+      projectRootPath
+    )}); if (relative.isEmpty) root else root.resolve(relative) }`,
+  ];
 }
 
 /**
