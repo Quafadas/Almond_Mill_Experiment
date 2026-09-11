@@ -17,7 +17,7 @@ import {
   shadowRangeToCell,
   spanLineBounds,
 } from "./mapping";
-import { describeError, errorStack, Logger } from "./log";
+import { describeError, errorStack, isCancellationError, Logger } from "./log";
 import { looksLikeScalaCliGeneratedSource } from "./scalaCliBuild";
 import { tokensWithinLines } from "./semanticTokens";
 import { ExtensionConfig, ShadowManager, ShadowState } from "./shadowManager";
@@ -793,20 +793,34 @@ export class LanguageFeatureRelay
     // and is deliberately unused: the command below has VS Code build a fresh context from
     // the markers on the shadow URI, which are Metals' own, in the coordinates Metals
     // reported them in. So the diagnostics a quick fix keys off need no back-translation.
+    const shadowRange = vscodeRange(cellRangeToShadow(context.span, plainRange(range)));
+    const only = codeActionContext.only?.value;
+    const resolveCount = Math.max(this.getConfig().codeActionResolveCount, 0);
     let results: (vscode.CodeAction | vscode.Command | undefined)[] | undefined;
     try {
       results = await vscode.commands.executeCommand<(vscode.CodeAction | vscode.Command | undefined)[]>(
         "vscode.executeCodeActionProvider",
         context.state.shadowUri,
-        vscodeRange(cellRangeToShadow(context.span, plainRange(range))),
-        codeActionContext.only?.value,
-        Math.max(this.getConfig().codeActionResolveCount, 0)
+        shadowRange,
+        only,
+        resolveCount
       );
     } catch (error) {
       // VS Code swallows a provider rejection, so without this the lightbulb just never
-      // appears and nothing anywhere says why.
-      this.log.error(`codeActions: request against ${context.state.relativePath} failed: ${describeError(error)}`);
-      this.log.debug(() => errorStack(error));
+      // appears and nothing anywhere says why. A `Canceled` rejection is the ordinary way a
+      // request the user has already moved past ends (they moved the caret, typed another
+      // character, ...) rather than a fault, so it is noted at `debug` instead of `error` -
+      // otherwise every keystroke leaves an alarming-looking line in the log for no reason.
+      const detail =
+        `cell ${context.span.cellIndex}, shadow ${context.state.relativePath}` +
+        `@${shadowRange.start.line}:${shadowRange.start.character}-${shadowRange.end.line}:${shadowRange.end.character}` +
+        `, only=${only ?? "<any>"}, resolveCount=${resolveCount}, triggerKind=${codeActionContext.triggerKind}`;
+      if (isCancellationError(error) || token.isCancellationRequested) {
+        this.log.debug(() => `codeActions: request against ${detail} canceled`);
+      } else {
+        this.log.error(`codeActions: request against ${detail} failed: ${describeError(error)}`);
+        this.log.debug(() => errorStack(error));
+      }
       return undefined;
     }
     if (!results || token.isCancellationRequested) {
