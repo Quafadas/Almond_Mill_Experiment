@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { formatLogLine, isEnabled, isLogLevel, LogLevel, Logger, LogSink } from "../src/log";
+import { formatLogLine, isCancellationError, isEnabled, isLogLevel, LogLevel, Logger, LogSink } from "../src/log";
 
 function recorder(): LogSink & { lines: string[]; chunks: string[] } {
   const lines: string[] = [];
@@ -70,4 +70,11 @@ test("enabled reports what would be written, for skipping work up front", () => 
   const { log } = loggerAt("debug");
   assert.equal(log.enabled("debug"), true);
   assert.equal(log.enabled("trace"), false);
+});
+
+test("isCancellationError recognizes VS Code's Canceled rejection and nothing else", () => {
+  assert.equal(isCancellationError(new Error("Canceled")), true);
+  assert.equal(isCancellationError(new Error("Illegal argument")), false);
+  assert.equal(isCancellationError("Canceled"), false);
+  assert.equal(isCancellationError(undefined), false);
 });

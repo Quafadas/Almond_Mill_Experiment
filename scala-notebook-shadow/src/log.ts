@@ -109,3 +109,13 @@ export function describeError(error: unknown): string {
 export function errorStack(error: unknown): string {
   return error instanceof Error && error.stack ? error.stack : String(error);
 }
+
+/**
+ * True for the rejection VS Code raises when a `CancellationToken` passed to a command fires
+ * mid-flight - its message is always the bare string "Canceled". That is the normal way a
+ * request the user has already moved past ends, not a fault, so callers can use this to keep
+ * it out of the noise `error`-level logging is for.
+ */
+export function isCancellationError(error: unknown): boolean {
+  return error instanceof Error && error.message === "Canceled";
+}
