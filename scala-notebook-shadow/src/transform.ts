@@ -1,3 +1,4 @@
+import * as nodePath from "node:path";
 import type * as vscode from "vscode";
 import {
   definedNames,
@@ -28,6 +29,17 @@ export interface ScalaNotebookConfig {
    * Empty or undefined leaves it out.
    */
   almondVersion?: string;
+  /**
+   * Where the notebook sits relative to the shadow file's own directory, POSIX-separated
+   * (`../analysis`, or "" when the two share a directory).
+   *
+   * Ammonite resolves `import $cp.^.resources` against the *notebook's* directory, while a
+   * relative path in a `//> using` directive resolves against the directory of the file
+   * carrying it - the shadow's. Translating one to the other needs this hop. Left undefined,
+   * `$cp` imports are still neutralized but contribute nothing to the header: a guess at the
+   * path would point the directive at a directory that isn't there.
+   */
+  notebookDirFromShadow?: string;
   /**
    * Identifier for the object every cell body is nested in (see `transform`).
    * Defaults to `NotebookCells`; ShadowManager passes the shadow file's base
@@ -229,11 +241,11 @@ function prelude(config: ScalaNotebookConfig): Prelude {
 
 /**
  * Ammonite/Almond "magic" imports. None are legal Scala, so any line using one is
- * commented out to keep it from erroring. `$ivy`/`$dep`/`$repo` additionally feed the
- * `//> using` header; `$file`, `$plugin`, `$scalac` and `$profile` have no shadow-file
+ * commented out to keep it from erroring. `$ivy`/`$dep`/`$repo` and `$cp` additionally feed
+ * the `//> using` header; `$file`, `$plugin`, `$scalac` and `$profile` have no shadow-file
  * equivalent and are only neutralized.
  */
-const MAGIC_IMPORT_LINE_RE = /^\s*import\s+\$(?:ivy|dep|repo|file|plugin|scalac|profile)\b/;
+const MAGIC_IMPORT_LINE_RE = /^\s*import\s+\$(?:ivy|dep|repo|cp|file|plugin|scalac|profile)\b/;
 
 /**
  * A scala-cli `using` directive written in a cell. Almond honours these per cell, but
@@ -253,9 +265,33 @@ const MAGIC_TERM_RE = /(\$plugin\.)?\$(ivy|dep|repo)\.\s*(?:`([^`]+)`|\{([^}]*)\
 
 const BACKTICKED_RE = /`([^`]+)`/g;
 
+/**
+ * One `import $cp` path: the dotted segments naming it, then optionally a braced group of
+ * further paths that share those segments as a prefix (`$cp.^.{resources, fixtures}`).
+ *
+ * The path is Ammonite's, not the file system's: it is written as Scala identifiers, with
+ * `^` standing for the parent directory and backticks around anything an identifier can't
+ * hold (`$cp.^.`test-resources`').
+ */
+const MAGIC_CP_RE = /\$cp((?:\s*\.\s*(?:\^|`[^`]+`|[A-Za-z_][A-Za-z0-9_]*))*)\s*(?:\.\s*\{([^}]*)\})?/g;
+
+/** One segment of such a path: `^`, a backticked name, or a plain identifier. */
+const CP_SEGMENT_RE = /\^|`([^`]+)`|[A-Za-z_][A-Za-z0-9_]*/g;
+
+/**
+ * A `$cp` entry the shadow file can't carry: scala-cli's `resourceDir` is handed to the
+ * compiler as a directory, and pointing it at a jar fails the *entire* compile with
+ * "Could not find package scala from compiler core libraries" - every cell in the notebook
+ * loses its diagnostics, not just the line that asked for the jar. A directory that does
+ * not exist, by contrast, is simply ignored, so only this one shape has to be turned away.
+ */
+const JAR_SUFFIX = ".jar";
+
 interface MagicImports {
   mvnDeps: string[];
   repositories: string[];
+  /** `//> using resourceDir` lines translated from `$cp` imports (see `collectClasspath`). */
+  resourceDirs: string[];
 }
 
 /** Split cell text into its real document lines, dropping one synthesized trailing empty line. */
@@ -314,13 +350,72 @@ function isResolvableCoordinate(coordinate: string): boolean {
   return !coordinate.endsWith(":_");
 }
 
+/** The file-system segments one Ammonite path expression names, `^` read as "up one". */
+function cpSegments(text: string): string[] {
+  const out: string[] = [];
+  CP_SEGMENT_RE.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = CP_SEGMENT_RE.exec(text)) !== null) {
+    out.push(match[0] === "^" ? ".." : match[1] ?? match[0]);
+  }
+  return out;
+}
+
+/**
+ * The paths one `$cp` import names: its dotted segments, or - when it ends in a braced group
+ * - those segments as a prefix to each entry in the group. A `{a => b}` rename is read as
+ * naming `a`: Ammonite's rename applies to the binding, not to the directory.
+ */
+function cpPaths(dotted: string, braced: string | undefined): string[][] {
+  const prefix = cpSegments(dotted);
+  if (braced === undefined) {
+    return prefix.length > 0 ? [prefix] : [];
+  }
+  return braced
+    .split(",")
+    .map((entry) => cpSegments(entry.split("=>")[0]))
+    .filter((segments) => segments.length > 0)
+    .map((segments) => [...prefix, ...segments]);
+}
+
+/**
+ * Record what a `$cp` import contributes to the header: the directory it names, rewritten
+ * from a path the *notebook's* directory resolves into one the *shadow file's* does.
+ *
+ * `nodePath.posix` throughout, never the platform's: the shadow file's bytes have to be the
+ * same on every OS (see the determinism test), and `notebookDirFromShadow` arrives already
+ * POSIX-separated for that reason.
+ *
+ * Only directories are translated - see {@link JAR_SUFFIX} for the jar a `$cp` may also name
+ * and why it is dropped instead.
+ */
+function collectClasspath(line: string, notebookDir: string, into: string[]): void {
+  MAGIC_CP_RE.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = MAGIC_CP_RE.exec(line)) !== null) {
+    for (const segments of cpPaths(match[1], match[2])) {
+      const resolved = nodePath.posix.normalize(nodePath.posix.join(notebookDir, ...segments));
+      if (!resolved.endsWith(JAR_SUFFIX)) {
+        into.push(resolved);
+      }
+    }
+  }
+}
+
 /**
  * If `line` is a magic import, record what it contributes to the `//> using` header and
  * report true so the caller comments the line out. Returns false for ordinary Scala.
+ *
+ * `notebookDir` is `ScalaNotebookConfig.notebookDirFromShadow`; undefined leaves `$cp`
+ * imports neutralized but untranslated.
  */
-function collectMagicImports(line: string, into: MagicImports): boolean {
+function collectMagicImports(line: string, notebookDir: string | undefined, into: MagicImports): boolean {
   if (!MAGIC_IMPORT_LINE_RE.test(line)) {
     return false;
+  }
+
+  if (notebookDir !== undefined) {
+    collectClasspath(line, notebookDir, into.resourceDirs);
   }
 
   MAGIC_TERM_RE.lastIndex = 0;
@@ -477,6 +572,80 @@ const SCOPE_OBJECT_PREFIX = "shadow scope ";
  */
 const MAX_NESTED_SCOPES = 100;
 
+/** A top-level `import` in a cell, read from the *emitted* line (see `planImportBlocks`). */
+const IMPORT_LINE_RE = /^\s*import\s/;
+
+/**
+ * Appended to an import's last line to open the block the imports after it live in. The
+ * `;` ends the import statement, which a bare `{` would instead be parsed as part of.
+ */
+const IMPORT_BLOCK_OPENER = " ; {";
+
+/**
+ * How many import blocks one shadow file may open before later imports go back to sharing a
+ * scope. Measured at 150 levels compiling without complaint (Scala 3.3.7); the cap sits below
+ * that for headroom, and a notebook with a hundred top-level imports has bigger problems.
+ *
+ * Exceeding it costs only the masking - the imports still land, flat, the way they did before.
+ */
+const MAX_IMPORT_BLOCKS = 100;
+
+/**
+ * Which lines get a block opened after them, so a later import masks an earlier one.
+ *
+ * Almond compiles each cell into its own wrapper and replays the imports of the cells before
+ * it, so an import providing a name an earlier import also provided simply masks it - the
+ * same relationship `planScopes` handles for a *definition* that masks an earlier one.
+ * Flattened into one scope the two are equal candidates instead, and Scala 3 reports an
+ * ambiguity on code the kernel compiled happily: a cell importing both `io.circe.literal.*`
+ * and a plotting library's `{*, given}` gets "Ambiguous extension methods" on every
+ * `json"..."` written in a later cell, which is the case this was written for.
+ *
+ * Opening the block by *appending* `; {` to the import's last line is what keeps it free of
+ * the mapping: no line is inserted and no column before a line's end moves, the same property
+ * the `resN_M` openers rest on. The rest of the cell and every later cell are emitted inside
+ * the block, and the braces close together at the end of the file.
+ *
+ * Two divergences from the kernel, both deliberate:
+ *
+ * Within a single cell the kernel *would* report the ambiguity, since there the imports and
+ * the code using them share one scope; here the later import masks the earlier one anyway.
+ * That errs toward accepting code the kernel rejects, never toward squiggling code it runs,
+ * which is the direction this whole file leans.
+ *
+ * Two imports written on one line share a block, so neither masks the other. Splitting them
+ * would mean inserting a line, and the mapping is worth more than the rarity it buys.
+ *
+ * A line the scanner calls unappendable is skipped: `; {` would land inside the string or
+ * comment the line ends in, and that import keeps the flat behaviour it had before.
+ */
+function planImportBlocks(
+  emittedLines: string[],
+  segments: StatementSegment[] | undefined,
+  emitted: ScannedLine[],
+  budget: number
+): Set<number> {
+  const opened = new Set<number>();
+  if (!segments) {
+    return opened;
+  }
+  for (const segment of segments) {
+    if (opened.size >= budget) {
+      break;
+    }
+    // Read from the emitted line, so an `import $ivy` already commented out is not an import
+    // any more and spends no nesting on a line that no longer brings a name into scope.
+    if (!IMPORT_LINE_RE.test(emittedLines[segment.startLine])) {
+      continue;
+    }
+    if (!emitted[segment.endLine].appendable) {
+      continue;
+    }
+    opened.add(segment.endLine);
+  }
+  return opened;
+}
+
 /**
  * Decide which cells have to open a nested object of their own.
  *
@@ -537,6 +706,10 @@ function directiveValue(value: string): string {
  * dependency is its own directive rather than an item under a key. That holds for the
  * `-Wconf`s too: scala-cli takes one `option` value per directive.
  *
+ * `resourceDirs` are the directories a cell's `import $cp` named (see `collectClasspath`),
+ * placed with the deps: like them, they are a classpath entry the notebook asked for rather
+ * than something the shadow file needs for its own sake.
+ *
  * `cellDirectives` are the ones lifted out of the first cell (see `hoistUsingDirective`),
  * emitted last and verbatim. Ordering carries no meaning to scala-cli, which reads the
  * whole header before resolving anything; last is simply where they read as the notebook's
@@ -547,12 +720,14 @@ function header(
   scalaVersion: string,
   repositories: string[],
   deps: string[],
+  resourceDirs: string[],
   cellDirectives: string[]
 ): string[] {
   return dedupe([
     `//> using scala ${directiveValue(scalaVersion)}`,
     ...repositories.map((repository) => `//> using repository ${directiveValue(repository)}`),
     ...deps.map((dep) => `//> using dep ${directiveValue(dep)}`),
+    ...resourceDirs.map((dir) => `//> using resourceDir ${directiveValue(dir)}`),
     ...SUPPRESSED_WARNINGS.map((wconf) => `//> using option ${directiveValue(wconf)}`),
     ...cellDirectives,
   ]);
@@ -568,7 +743,7 @@ function header(
 export function transform(cells: SourceCell[], config: ScalaNotebookConfig): TransformResult {
   const codeCells = selectScalaCodeCells(cells);
 
-  const magic: MagicImports = { mvnDeps: [], repositories: [] };
+  const magic: MagicImports = { mvnDeps: [], repositories: [], resourceDirs: [] };
   const cellDirectives: string[] = [];
   const prepared: PreparedCell[] = codeCells.map((cell, i) => {
     const source = realLines(cell.text);
@@ -584,7 +759,7 @@ export function transform(cells: SourceCell[], config: ScalaNotebookConfig): Tra
       // statement, so segmenting the rewritten (commented-out) lines would shift every M index.
       segments: segmentStatements(source),
       rewritten: source.map((line, lineIndex) =>
-        collectMagicImports(line, magic) ||
+        collectMagicImports(line, config.notebookDirFromShadow, magic) ||
         (scanned !== undefined && hoistUsingDirective(line, scanned[lineIndex], cellDirectives))
           ? commentOut(line)
           : line
@@ -598,16 +773,31 @@ export function transform(cells: SourceCell[], config: ScalaNotebookConfig): Tra
   const allDeps = dedupe([...predef.mvnDeps, ...config.mvnDeps, ...magic.mvnDeps]);
   const repositories = dedupe([...predef.repositories, ...magic.repositories]);
 
-  const directives = header(config.scalaVersion, repositories, allDeps, cellDirectives);
+  const directives = header(
+    config.scalaVersion,
+    repositories,
+    allDeps,
+    dedupe(magic.resourceDirs),
+    cellDirectives
+  );
 
   const outLines: string[] = [...directives, `object ${wrapperObjectName(config)} {`, ...preamble];
   const headerLines = outLines.length;
   const spans: CellSpan[] = [];
   let openScopes = 0;
+  let openImportBlocks = 0;
 
   codeCells.forEach((cell, i) => {
     const { rewritten: lines, segments } = prepared[i];
-    const bindings = planResultBindings(i + 1, segments, scanLines(lines));
+    const emitted = scanLines(lines);
+    const bindings = planResultBindings(i + 1, segments, emitted);
+    const importBlocks = planImportBlocks(
+      lines,
+      segments,
+      emitted,
+      MAX_IMPORT_BLOCKS - openImportBlocks
+    );
+    openImportBlocks += importBlocks.size;
 
     if (opensScope[i]) {
       openScopes += 1;
@@ -616,8 +806,16 @@ export function transform(cells: SourceCell[], config: ScalaNotebookConfig): Tra
     outLines.push(`${CELL_MARKER_PREFIX}${cell.index} ${cell.uri.fragment} */${bindings.openers.get(-1) ?? ""}`);
     const startLine = outLines.length;
     lines.forEach((line, lineIndex) => {
-      // Order matters: a line can close one statement and open the next.
-      outLines.push(`${line}${bindings.closers.get(lineIndex) ?? ""}${bindings.openers.get(lineIndex) ?? ""}`);
+      // Order matters: a line can close one statement, open an import's block, and open the
+      // next statement - and the `val resN_M = (` has to land *inside* the block it follows.
+      const opener = bindings.openers.get(lineIndex) ?? "";
+      const importBlock = importBlocks.has(lineIndex) ? IMPORT_BLOCK_OPENER : "";
+      outLines.push(
+        `${line}${bindings.closers.get(lineIndex) ?? ""}${importBlock}` +
+          // `{` has already ended the import, so the opener's own `;` would only add an empty
+          // statement inside the fresh block - legal, but noise in a file people read.
+          `${importBlock ? opener.replace(/^ ;/, "") : opener}`
+      );
     });
     spans.push({
       cellIndex: cell.index,
@@ -631,7 +829,9 @@ export function transform(cells: SourceCell[], config: ScalaNotebookConfig): Tra
     }
   });
 
-  for (let i = 0; i <= openScopes; i++) {
+  // The wrapper, the scopes `planScopes` opened and the blocks `planImportBlocks` opened are
+  // all strictly nested in emission order, so closing them is one run of braces.
+  for (let i = 0; i <= openScopes + openImportBlocks; i++) {
     outLines.push("}");
   }
 

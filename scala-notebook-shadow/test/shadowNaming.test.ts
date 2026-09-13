@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { shadowBaseName } from "../src/shadowNaming";
+import { relativeNotebookDir, shadowBaseName } from "../src/shadowNaming";
 
 /**
  * The longest name the toolchain accepts, measured on macOS/APFS with scala-cli and Scala
@@ -129,4 +129,13 @@ test("a capped name is still a legal Scala identifier", () => {
   for (const name of names) {
     assert.match(name, /^[A-Za-z_][A-Za-z0-9_]*$/);
   }
+});
+
+
+test("relativeNotebookDir spans from the shadow's directory to the notebook's", () => {
+  const shadow = "/w/notebook-shadow/analysis_sample.sc";
+  assert.equal(relativeNotebookDir(shadow, "/w/analysis/sample.ipynb"), "../analysis");
+  assert.equal(relativeNotebookDir(shadow, "/w/a/b/c/sample.ipynb"), "../a/b/c");
+  // A notebook beside its own shadow has no hop to make.
+  assert.equal(relativeNotebookDir(shadow, "/w/notebook-shadow/sample.ipynb"), "");
 });

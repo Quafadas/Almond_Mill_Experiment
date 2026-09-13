@@ -2,7 +2,7 @@ import * as path from "path";
 import * as vscode from "vscode";
 import { describeError, errorStack, Logger, LogLevel } from "./log";
 import { looksGenerated, orphanedShadowNames } from "./shadowCleanup";
-import { shadowBaseName, SHADOW_FILE_EXTENSION } from "./shadowNaming";
+import { relativeNotebookDir, shadowBaseName, SHADOW_FILE_EXTENSION } from "./shadowNaming";
 import { ScalaNotebookConfig, ShadowMapping, SourceCell, transform } from "./transform";
 
 export interface ExtensionConfig extends ScalaNotebookConfig {
@@ -329,6 +329,7 @@ export class ShadowManager implements vscode.Disposable {
     const { text, mapping } = transform(this.toSourceCells(notebook), {
       ...config,
       wrapperObjectName: baseName,
+      notebookDirFromShadow: relativeNotebookDir(shadowUri.fsPath, notebook.uri.fsPath),
     });
 
     let existed = true;
@@ -413,6 +414,7 @@ export class ShadowManager implements vscode.Disposable {
     const { text, mapping } = transform(this.toSourceCells(notebook), {
       ...config,
       wrapperObjectName: state.wrapperObjectName,
+      notebookDirFromShadow: relativeNotebookDir(state.shadowUri.fsPath, notebook.uri.fsPath),
     });
 
     if (!force && text === state.appliedText) {
