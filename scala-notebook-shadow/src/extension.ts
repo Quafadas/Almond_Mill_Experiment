@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { CONFIG_DEFAULTS } from "./configDefaults";
+import { CONFIG_DEFAULTS, SHADOW_TEXT_SETTINGS } from "./configDefaults";
 import { LanguageFeatureRelay, RUN_SHADOW_COMMAND, ShadowCommandArgs } from "./languageFeatures";
 import { isLogLevel, LogLevel, Logger } from "./log";
 import { DiagnosticRelay } from "./relay";
@@ -123,6 +123,17 @@ export function activate(context: vscode.ExtensionContext): void {
         logLevel = readLogLevel(vscode.workspace.getConfiguration("scalaNotebook"));
         log.info(`Log level set to ${logLevel}`);
       }
+      // A setting that changes what a shadow contains has to reach the shadows already on
+      // disk, or it reads as having done nothing until the next keystroke in a cell.
+      if (!SHADOW_TEXT_SETTINGS.some((key) => e.affectsConfiguration(`scalaNotebook.${key}`))) {
+        return;
+      }
+      void shadowManager
+        .applyConfigurationChange(e.affectsConfiguration("scalaNotebook.shadowDir"))
+        .catch((error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error);
+          log.error(`Failed to apply a settings change to the shadow scripts: ${message}`);
+        });
     }),
 
     vscode.workspace.onDidOpenNotebookDocument((notebook) => {

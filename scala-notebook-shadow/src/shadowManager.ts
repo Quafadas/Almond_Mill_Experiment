@@ -59,6 +59,8 @@ export class ShadowManager implements vscode.Disposable {
    */
   private readonly opening = new Set<string>();
   private readonly analysisChangedEmitter = new vscode.EventEmitter<ShadowState>();
+  /** Tail of the serialized `applyConfigurationChange` queue; never rejects. */
+  private configChanges: Promise<void> = Promise.resolve();
 
   /**
    * Fires when a notebook's shadow script, or Metals' analysis of it, may have moved on:
@@ -332,18 +334,31 @@ export class ShadowManager implements vscode.Disposable {
       notebookDirFromShadow: relativeNotebookDir(shadowUri.fsPath, notebook.uri.fsPath),
     });
 
-    let existed = true;
+    // `mapping` describes `text` and nothing else, so `text` is what has to be on disk:
+    // Metals compiles the file, and a diagnostic it reports against some other revision
+    // would be relayed through spans that do not describe it. A shadow left behind by an
+    // earlier session can be exactly that - the notebook was edited elsewhere, a
+    // `scalaNotebook.*` setting changed, or this extension's own output did - and a header
+    // that gained or lost a line offsets every squiggle in the notebook, silently, until
+    // the first cell edit happens to regenerate it.
+    //
+    // Compared rather than written unconditionally, so reopening an unchanged notebook -
+    // the ordinary case - still costs no write and no compile.
+    let onDisk: string | undefined;
     try {
-      await vscode.workspace.fs.stat(shadowUri);
+      onDisk = Buffer.from(await vscode.workspace.fs.readFile(shadowUri)).toString("utf8");
     } catch {
-      existed = false;
+      onDisk = undefined;
     }
-    if (!existed) {
+    if (onDisk === undefined) {
       await vscode.workspace.fs.writeFile(shadowUri, Buffer.from(text, "utf8"));
       this.log.info(`Created ${shadowUri.toString()} (object ${baseName})`);
+    } else if (onDisk !== text) {
+      await vscode.workspace.fs.writeFile(shadowUri, Buffer.from(text, "utf8"));
+      this.log.info(`Rewrote ${relativePath}: the shadow on disk was out of step with the notebook.`);
     }
 
-    const doc = await vscode.workspace.openTextDocument(shadowUri);
+    await vscode.workspace.openTextDocument(shadowUri);
 
     const state: ShadowState = {
       notebook,
@@ -351,19 +366,13 @@ export class ShadowManager implements vscode.Disposable {
       relativePath,
       wrapperObjectName: baseName,
       mapping,
-      appliedText: existed ? undefined : text,
+      appliedText: text,
       closed: false,
       debounceHandle: undefined,
     };
     this.states.set(notebook.uri.toString(), state);
     this.shadowUriToNotebookUri.set(shadowUri.toString(), notebook.uri.toString());
     this.indexCells(state);
-
-    if (existed) {
-      // Reconcile with what's actually on disk so a no-op edit doesn't fire on first change.
-      state.appliedText = doc.getText();
-      state.mapping = mapping;
-    }
   }
 
   /** Debounced regeneration entry point, called on every notebook content change. */
@@ -388,6 +397,67 @@ export class ShadowManager implements vscode.Disposable {
   /** Regenerate + save the shadow document. `force` bypasses the unchanged-text short-circuit. */
   async regenerate(notebook: vscode.NotebookDocument, force: boolean): Promise<void> {
     await this.updateShadow(notebook, force, true);
+  }
+
+  /**
+   * Re-apply the `scalaNotebook.*` settings to the shadows already on disk.
+   *
+   * Without this a setting reads as having done nothing: `getConfig` is consulted afresh on
+   * every rewrite, so a new `scalaVersion` or `mvnDeps` does land - but only once something
+   * else regenerates the shadow, which for an idle notebook means the next keystroke in a
+   * cell. One rewrite each and a single compile at the end puts them all in step now.
+   *
+   * `shadowDirChanged` is the case that cannot be applied in place. The directory is folded
+   * into `shadowUri` when a state is created and every later rewrite goes through that URI,
+   * so the shadows have to be rebuilt in the new directory rather than updated. The old
+   * files are deleted first, by the URIs we created them under rather than by re-deriving
+   * the old directory: left behind they stay part of the build the old directory owns, and
+   * every cell would report a duplicate definition against a file the user cannot see.
+   */
+  async applyConfigurationChange(shadowDirChanged: boolean): Promise<void> {
+    // Serialized, because the `shadowDirChanged` path deletes shadows and recreates them:
+    // two runs overlapping would let one delete what the other had just written. Chaining
+    // off a promise that cannot reject keeps a failed run from stalling every later one.
+    const run = this.configChanges.then(() => this.runConfigurationChange(shadowDirChanged));
+    this.configChanges = run.catch(() => undefined);
+    await run;
+  }
+
+  private async runConfigurationChange(shadowDirChanged: boolean): Promise<void> {
+    const notebooks = [...this.states.values()].map((state) => state.notebook);
+    if (notebooks.length === 0) {
+      return;
+    }
+
+    if (shadowDirChanged) {
+      for (const state of [...this.states.values()]) {
+        try {
+          await vscode.workspace.fs.delete(state.shadowUri);
+          this.log.info(`Removed ${state.relativePath}; the shadow directory setting changed.`);
+        } catch (error) {
+          this.log.warn(
+            `Could not remove ${state.relativePath} after the shadow directory changed: ${describeError(error)}`
+          );
+        }
+        this.closeForNotebook(state.notebook);
+      }
+      for (const notebook of notebooks) {
+        await this.openForNotebook(notebook);
+      }
+      await this.cleanOrphanedShadows();
+      await this.cascadeCompile();
+      return;
+    }
+
+    for (const notebook of notebooks) {
+      try {
+        await this.updateShadow(notebook, true, false);
+      } catch (error) {
+        this.log.error(`Failed to regenerate ${notebook.uri.fsPath} after a settings change: ${describeError(error)}`);
+        this.log.debug(() => errorStack(error));
+      }
+    }
+    await this.cascadeCompile();
   }
 
   /** Make the shadow current before an interactive language request, without starting a full compile. */
@@ -442,13 +512,21 @@ export class ShadowManager implements vscode.Disposable {
     );
     this.analysisChangedEmitter.fire(state);
 
-    if (compile && config.compileOnSave) {
-      try {
-        await vscode.commands.executeCommand("metals.compile-cascade");
-      } catch (error) {
-        this.log.error(`Metals compile failed to start: ${describeError(error)}`);
-        this.log.debug(() => errorStack(error));
-      }
+    if (compile) {
+      await this.cascadeCompile();
+    }
+  }
+
+  /** Ask Metals to recompile, so diagnostics catch up with a shadow we just rewrote. */
+  private async cascadeCompile(): Promise<void> {
+    if (!this.getConfig().compileOnSave) {
+      return;
+    }
+    try {
+      await vscode.commands.executeCommand("metals.compile-cascade");
+    } catch (error) {
+      this.log.error(`Metals compile failed to start: ${describeError(error)}`);
+      this.log.debug(() => errorStack(error));
     }
   }
 

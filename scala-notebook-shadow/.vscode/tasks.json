@@ -1,0 +1,26 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      // Named "npm: compile", which is what the launch configurations preLaunchTask on.
+      // `compile` cleans `out/` first, so a renamed or deleted source cannot leave a stale
+      // `.js` behind for the extension host to load.
+      "type": "npm",
+      "script": "compile",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": ["$tsc"],
+      "label": "npm: compile"
+    },
+    {
+      "type": "npm",
+      "script": "watch",
+      "group": "build",
+      "isBackground": true,
+      "problemMatcher": ["$tsc-watch"],
+      "label": "npm: watch"
+    }
+  ]
+}

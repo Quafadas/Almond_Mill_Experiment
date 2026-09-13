@@ -5,6 +5,23 @@
   "version": "0.0.3",
   "private": true,
   "publisher": "almond-mill-experiment",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Quafadas/Almond_Mill_Experiment.git",
+    "directory": "scala-notebook-shadow"
+  },
+  "homepage": "https://github.com/Quafadas/Almond_Mill_Experiment#readme",
+  "bugs": {
+    "url": "https://github.com/Quafadas/Almond_Mill_Experiment/issues"
+  },
+  "keywords": [
+    "scala",
+    "metals",
+    "notebook",
+    "jupyter",
+    "almond"
+  ],
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -116,8 +133,10 @@
     }
   },
   "scripts": {
-    "compile": "tsc -p .",
-    "watch": "tsc -p . --watch",
+    "clean": "node -e \"require('node:fs').rmSync('out', { recursive: true, force: true })\"",
+    "compile": "npm run clean && tsc -p .",
+    "watch": "npm run clean && tsc -p . --watch",
+    "vscode:prepublish": "npm run compile",
     "pretest": "npm run compile",
     "test": "node --test \"out/test/*.test.js\"",
     "lint": "eslint .",
