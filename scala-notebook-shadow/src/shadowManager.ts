@@ -59,6 +59,8 @@ export class ShadowManager implements vscode.Disposable {
    */
   private readonly opening = new Set<string>();
   private readonly analysisChangedEmitter = new vscode.EventEmitter<ShadowState>();
+  /** Tail of the serialized `applyConfigurationChange` queue; never rejects. */
+  private configChanges: Promise<void> = Promise.resolve();
 
   /**
    * Fires when a notebook's shadow script, or Metals' analysis of it, may have moved on:
@@ -397,6 +399,67 @@ export class ShadowManager implements vscode.Disposable {
     await this.updateShadow(notebook, force, true);
   }
 
+  /**
+   * Re-apply the `scalaNotebook.*` settings to the shadows already on disk.
+   *
+   * Without this a setting reads as having done nothing: `getConfig` is consulted afresh on
+   * every rewrite, so a new `scalaVersion` or `mvnDeps` does land - but only once something
+   * else regenerates the shadow, which for an idle notebook means the next keystroke in a
+   * cell. One rewrite each and a single compile at the end puts them all in step now.
+   *
+   * `shadowDirChanged` is the case that cannot be applied in place. The directory is folded
+   * into `shadowUri` when a state is created and every later rewrite goes through that URI,
+   * so the shadows have to be rebuilt in the new directory rather than updated. The old
+   * files are deleted first, by the URIs we created them under rather than by re-deriving
+   * the old directory: left behind they stay part of the build the old directory owns, and
+   * every cell would report a duplicate definition against a file the user cannot see.
+   */
+  async applyConfigurationChange(shadowDirChanged: boolean): Promise<void> {
+    // Serialized, because the `shadowDirChanged` path deletes shadows and recreates them:
+    // two runs overlapping would let one delete what the other had just written. Chaining
+    // off a promise that cannot reject keeps a failed run from stalling every later one.
+    const run = this.configChanges.then(() => this.runConfigurationChange(shadowDirChanged));
+    this.configChanges = run.catch(() => undefined);
+    await run;
+  }
+
+  private async runConfigurationChange(shadowDirChanged: boolean): Promise<void> {
+    const notebooks = [...this.states.values()].map((state) => state.notebook);
+    if (notebooks.length === 0) {
+      return;
+    }
+
+    if (shadowDirChanged) {
+      for (const state of [...this.states.values()]) {
+        try {
+          await vscode.workspace.fs.delete(state.shadowUri);
+          this.log.info(`Removed ${state.relativePath}; the shadow directory setting changed.`);
+        } catch (error) {
+          this.log.warn(
+            `Could not remove ${state.relativePath} after the shadow directory changed: ${describeError(error)}`
+          );
+        }
+        this.closeForNotebook(state.notebook);
+      }
+      for (const notebook of notebooks) {
+        await this.openForNotebook(notebook);
+      }
+      await this.cleanOrphanedShadows();
+      await this.cascadeCompile();
+      return;
+    }
+
+    for (const notebook of notebooks) {
+      try {
+        await this.updateShadow(notebook, true, false);
+      } catch (error) {
+        this.log.error(`Failed to regenerate ${notebook.uri.fsPath} after a settings change: ${describeError(error)}`);
+        this.log.debug(() => errorStack(error));
+      }
+    }
+    await this.cascadeCompile();
+  }
+
   /** Make the shadow current before an interactive language request, without starting a full compile. */
   async synchronizeForLanguageFeature(notebook: vscode.NotebookDocument): Promise<void> {
     const state = this.states.get(notebook.uri.toString());
@@ -449,13 +512,21 @@ export class ShadowManager implements vscode.Disposable {
     );
     this.analysisChangedEmitter.fire(state);
 
-    if (compile && config.compileOnSave) {
-      try {
-        await vscode.commands.executeCommand("metals.compile-cascade");
-      } catch (error) {
-        this.log.error(`Metals compile failed to start: ${describeError(error)}`);
-        this.log.debug(() => errorStack(error));
-      }
+    if (compile) {
+      await this.cascadeCompile();
+    }
+  }
+
+  /** Ask Metals to recompile, so diagnostics catch up with a shadow we just rewrote. */
+  private async cascadeCompile(): Promise<void> {
+    if (!this.getConfig().compileOnSave) {
+      return;
+    }
+    try {
+      await vscode.commands.executeCommand("metals.compile-cascade");
+    } catch (error) {
+      this.log.error(`Metals compile failed to start: ${describeError(error)}`);
+      this.log.debug(() => errorStack(error));
     }
   }
 
