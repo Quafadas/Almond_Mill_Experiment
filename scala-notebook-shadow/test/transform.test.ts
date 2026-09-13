@@ -244,7 +244,9 @@ test("wrapping preserves exact cell line mapping across a multi-statement cell",
 
   assert.equal(span.lineCount, 3);
   assert.ok(lines[span.startLine].startsWith('println("hi")'));
-  assert.equal(lines[span.startLine + 1], "import scala.collection.mutable");
+  // The import now carries an appended block opener; every column before the line's end,
+  // and the line's position, are what they were (see `planImportBlocks`).
+  assert.ok(lines[span.startLine + 1].startsWith("import scala.collection.mutable"));
   assert.equal(lines[span.startLine + 2], "val buf = mutable.ListBuffer(add(1, 2))");
 });
 
@@ -306,13 +308,71 @@ test("a coordinate using Almond's `_` version placeholder is dropped, not writte
   assert.ok(text.includes("/* [shadow] import $ivy.`sh.almond::scala-kernel-api:_` */"));
 });
 
-test("an ordinary Scala import is left completely alone", () => {
+test("$cp becomes a resourceDir directive, resolved from the notebook's directory to the shadow's", () => {
+  // The notebook is one directory below the shadow, so its `^` (up one, to the notebook's
+  // parent) is the shadow's own directory, and `^.resources` the `resources` beside it.
+  const cells = [cell(0, "import $cp.^.resources\nval x = 1\n")];
+  const { text, mapping } = transform(cells, { ...baseConfig, notebookDirFromShadow: "../analysis" });
+  assert.ok(text.includes("//> using resourceDir ../resources\n"));
+
+  // Neutralized in place, like every other magic import: line numbering is untouched.
+  const lines = text.split("\n");
+  const span = mapping.spans[0];
+  assert.equal(lines[span.startLine], "/* [shadow] import $cp.^.resources */");
+  assert.equal(lines[span.startLine + 1], "val x = 1");
+  assert.equal(span.lineCount, 2);
+});
+
+test("a $cp path is resolved through every `^`, and against a notebook beside its shadow", () => {
+  const deep = transform([cell(0, "import $cp.^.^.shared.resources\n")], {
+    ...baseConfig,
+    notebookDirFromShadow: "../notebooks/reports",
+  });
+  assert.ok(deep.text.includes("//> using resourceDir ../shared/resources\n"));
+
+  const sameDir = transform([cell(0, "import $cp.resources\n")], {
+    ...baseConfig,
+    notebookDirFromShadow: "",
+  });
+  assert.ok(sameDir.text.includes("//> using resourceDir resources\n"));
+});
+
+test("$cp takes backticked segments and braced groups, and deduplicates the result", () => {
+  const cells = [
+    cell(0, "import $cp.^.`test-resources`\n"),
+    cell(1, "import $cp.^.{resources, fixtures}\n"),
+    cell(2, "import $cp.^.resources\n"),
+  ];
+  const { text } = transform(cells, { ...baseConfig, notebookDirFromShadow: "../analysis" });
+  assert.ok(text.includes("//> using resourceDir ../test-resources\n"));
+  assert.ok(text.includes("//> using resourceDir ../fixtures\n"));
+  assert.equal(text.split("//> using resourceDir ../resources\n").length - 1, 1);
+});
+
+test("a $cp naming a jar is neutralized without a directive", () => {
+  // scala-cli hands a `resourceDir` to the compiler as a directory; pointing it at a jar
+  // fails the whole compile ("Could not find package scala from compiler core libraries"),
+  // costing every cell its diagnostics. A missing directory is ignored, so only this drops.
+  const cells = [cell(0, "import $cp.^.lib.`extra.jar`\nimport $cp.^.resources\n")];
+  const { text } = transform(cells, { ...baseConfig, notebookDirFromShadow: "../analysis" });
+  assert.ok(!text.includes("extra.jar\n"), "no directive names the jar");
+  assert.ok(text.includes("//> using resourceDir ../resources\n"), "the directory still lands");
+  assert.ok(text.includes("/* [shadow] import $cp.^.lib.`extra.jar` */"), "still neutralized");
+});
+
+test("$cp is neutralized but untranslated when the notebook's location is unknown", () => {
+  const { text } = transform([cell(0, "import $cp.^.resources\n")], baseConfig);
+  assert.ok(!text.includes("//> using resourceDir"), "no guess at where the directory is");
+  assert.ok(text.includes("/* [shadow] import $cp.^.resources */"));
+});
+
+test("an ordinary Scala import is never rewritten before its end", () => {
   const cells = [cell(0, "import scala.collection.mutable\nimport java.nio.file.{Files, Paths}\n")];
   const { text, mapping } = transform(cells, baseConfig);
   const lines = text.split("\n");
   const span = mapping.spans[0];
-  assert.equal(lines[span.startLine], "import scala.collection.mutable");
-  assert.equal(lines[span.startLine + 1], "import java.nio.file.{Files, Paths}");
+  assert.equal(lines[span.startLine], "import scala.collection.mutable ; {");
+  assert.equal(lines[span.startLine + 1], "import java.nio.file.{Files, Paths} ; {");
   assert.ok(!text.includes("[shadow]"));
 });
 
@@ -339,6 +399,69 @@ function assertColumnsPreserved(cells: SourceCell[], text: string, mapping: { sp
     });
   });
 }
+
+test("a later import is nested inside an earlier one, so it masks it", () => {
+  // Almond replays a cell's imports into the next cell's wrapper, where a later import masks
+  // an earlier one of the same name. Flat, the two are equal candidates and Scala 3 calls a
+  // use of the shared name ambiguous - on code the kernel compiled. See `planImportBlocks`.
+  const cells = [
+    cell(0, "import io.circe.literal.*\nimport viz.plots.SetupVega.{*, given}\n"),
+    cell(1, 'val x = json"""{}"""\n'),
+  ];
+  const { text, mapping } = transform(cells, baseConfig);
+  const lines = text.split("\n");
+  const span = mapping.spans[0];
+
+  assert.ok(lines[span.startLine].endsWith(" ; {"), "the first import opens a block");
+  assert.ok(lines[span.startLine + 1].endsWith(" ; {"), "the second opens one inside it");
+  // The use sits inside both, so the innermost - the last import - is the one it sees.
+  assert.ok(mapping.spans[1].startLine > span.startLine + 1);
+});
+
+test("every block an import opens is closed, and only at the end of the file", () => {
+  const cells = [
+    cell(0, "import a.b.*\nimport c.d.*\nval x = 1\n"),
+    cell(1, "import e.f.*\nval x = 2\n"), // also redefines x, so a scope object opens too
+  ];
+  const { text } = transform(cells, baseConfig);
+  const lines = text.split("\n").filter((line) => line.length > 0);
+
+  const opened = lines.filter((line) => line.endsWith(" ; {")).length;
+  assert.equal(opened, 3, "one block per import");
+
+  const trailing = lines.length - lines.findIndex((line, i) => line === "}" && lines.slice(i).every((l) => l === "}"));
+  // Three import blocks, one `shadow scope` object, and the wrapper object.
+  assert.equal(trailing, 5);
+});
+
+test("an import whose line ends inside a comment opens no block", () => {
+  // `; {` would land inside the comment, leaving the brace unbalanced.
+  const cells = [cell(0, "import a.b.* // keep this\nimport c.d.*\n")];
+  const { text, mapping } = transform(cells, baseConfig);
+  const lines = text.split("\n");
+  const span = mapping.spans[0];
+  assert.equal(lines[span.startLine], "import a.b.* // keep this", "untouched");
+  assert.ok(lines[span.startLine + 1].endsWith(" ; {"), "the appendable one still nests");
+});
+
+test("a magic import opens no block, having been commented out", () => {
+  const cells = [cell(0, "import $ivy.`com.lihaoyi::os-lib:0.11.3`\nimport os.*\n")];
+  const { text, mapping } = transform(cells, baseConfig);
+  const lines = text.split("\n");
+  const span = mapping.spans[0];
+  assert.equal(lines[span.startLine], "/* [shadow] import $ivy.`com.lihaoyi::os-lib:0.11.3` */");
+  assert.ok(lines[span.startLine + 1].endsWith(" ; {"));
+});
+
+test("a multi-line import opens its block after its last line", () => {
+  const cells = [cell(0, "import java.nio.file.{\n  Files,\n  Paths\n}\nval f = Files\n")];
+  const { text, mapping } = transform(cells, baseConfig);
+  const lines = text.split("\n");
+  const span = mapping.spans[0];
+  assert.equal(lines[span.startLine], "import java.nio.file.{");
+  assert.equal(lines[span.startLine + 3], "} ; {", "opened once the import is complete");
+  assert.equal(span.lineCount, 5, "no line inserted inside the cell");
+});
 
 test("a cell's trailing expression is bound exactly as Almond numbers it", () => {
   // Reproduces the reported session: os.pwd is statement 2 of the first cell -> res1_2.

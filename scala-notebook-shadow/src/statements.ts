@@ -60,6 +60,23 @@ const CONTINUES_PREVIOUS =
 const EXPECTS_CONTINUATION =
   /(?:=>|<-|=|\+|-|\*|\/|%|\||&|\^|<|>|:|,|\.|\(|\[|\{)$|\b(?:if|else|then|do|yield|while|for|match|new|with|extends|derives|return|throw)$/;
 
+/**
+ * A wildcard `import a.*` (or `export a.*`) ends in exactly what `EXPECTS_CONTINUATION` reads
+ * as a trailing infix `*`, yet it is a complete statement.
+ *
+ * Left to that reading, the statement on the next line is segmented as part of the import:
+ * it loses its own `resN_M` - the merged statement now opens with `import`, which Almond
+ * binds nothing for - and every `M` after it drifts from the number the kernel gave it.
+ * Nothing else ends in `.*`: a line genuinely continuing with an infix `*` has an operand
+ * before it, not a selector dot.
+ */
+const COMPLETE_WILDCARD_IMPORT = /^(?:import|export)\b.*\.\*$/;
+
+/** Whether `code` - a line's blanked text, trimmed - leaves its statement unfinished. */
+function expectsContinuation(code: string): boolean {
+  return EXPECTS_CONTINUATION.test(code) && !COMPLETE_WILDCARD_IMPORT.test(code);
+}
+
 /** Statements opening with one of these are definitions; Almond gives them no `resN_M`. */
 const DEFINITION_START =
   /^(?:@|import\b|export\b|package\b|val\b|var\b|def\b|lazy\b|given\b|type\b|class\b|object\b|trait\b|enum\b|case\b|implicit\b|final\b|sealed\b|abstract\b|private\b|protected\b|override\b|inline\b|opaque\b|transparent\b|extension\b|end\b)/;
@@ -232,7 +249,7 @@ export function segmentStatements(lines: string[]): StatementSegment[] | undefin
       line.depthBefore === 0 &&
       line.indent === 0 &&
       !CONTINUES_PREVIOUS.test(trimmed) &&
-      (previousCode < 0 || !EXPECTS_CONTINUATION.test(scanned[previousCode].code.trim()));
+      (previousCode < 0 || !expectsContinuation(scanned[previousCode].code.trim()));
     if (startsStatement) {
       starts.push(i);
     }

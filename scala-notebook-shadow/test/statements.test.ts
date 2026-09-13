@@ -173,3 +173,32 @@ test("a cell that cannot be segmented defines an unknown set of names", () => {
 test("statementNames reads a definition spread over several lines", () => {
   assert.deepEqual(names("def f(\n  a: Int\n) = a"), { names: ["f"], unknown: false });
 });
+
+test("a wildcard import ends its statement, despite the trailing `*`", () => {
+  // `*` is an infix operator at a line's end, so `import a.*` used to swallow the statement
+  // under it: the expression lost its own binding and every later `M` drifted from Almond's.
+  const segments = segment("import scala.math.*\n1 + 1\n2 + 2");
+
+  assert.equal(segments.length, 3);
+  assert.deepEqual(
+    segments.map((s) => s.isExpression),
+    [false, true, true]
+  );
+  assert.deepEqual(
+    segments.map((s) => s.startLine),
+    [0, 1, 2]
+  );
+});
+
+test("a line genuinely continuing with an infix `*` is still read as one statement", () => {
+  const segments = segment("val area = width *\n  height");
+  assert.equal(segments.length, 1);
+  assert.equal(segments[0].endLine, 1);
+});
+
+test("a multi-line import is one statement, ending on its closing brace", () => {
+  const segments = segment("import java.nio.file.{\n  Files,\n  Paths\n}\nval f = Files");
+  assert.equal(segments.length, 2);
+  assert.equal(segments[0].endLine, 3);
+  assert.equal(segments[1].startLine, 4);
+});

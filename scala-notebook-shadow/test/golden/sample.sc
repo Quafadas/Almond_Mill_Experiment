@@ -21,7 +21,7 @@ import kernel.publish.display
 /* [shadow] import $ivy.`com.lihaoyi::os-lib:0.11.3` */
 /* [shadow] import $ivy.`com.lihaoyi::upickle:4.0.2` */
 
-import scala.collection.mutable
+import scala.collection.mutable ; {
 
 def add(a: Int, b: Int): Int = a + b
 
@@ -62,5 +62,6 @@ repl.pprinter() = {
 })
 
 val f = Foo(1)
+}
 }
 }

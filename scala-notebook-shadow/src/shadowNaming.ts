@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import * as path from "node:path";
 
 /**
  * A notebook's shadow script is named after the notebook's path within the workspace:
@@ -34,6 +35,25 @@ export const SHADOW_FILE_EXTENSION = ".sc";
 /** The file name a notebook at `relativePath` within the workspace folder shadows to. */
 export function shadowFileName(relativePath: string): string {
   return `${shadowBaseName(relativePath)}${SHADOW_FILE_EXTENSION}`;
+}
+
+/**
+ * Where a notebook sits relative to the directory holding its shadow file, POSIX-separated
+ * and "" when the two share one.
+ *
+ * A notebook's cells write paths relative to the notebook (`import $cp.^.resources`), while
+ * the directives the shadow file carries resolve relative to the shadow file. Since the
+ * shadow lives in one flat directory for the whole workspace and the notebook can be
+ * anywhere under it, the two bases are almost never the same place, and this is the hop
+ * between them (see `ScalaNotebookConfig.notebookDirFromShadow`).
+ *
+ * Separators are normalized so the shadow's text is the same on Windows as on macOS, and so
+ * the directive is one scala-cli reads as a path rather than as a single odd segment.
+ */
+export function relativeNotebookDir(shadowFsPath: string, notebookFsPath: string): string {
+  return path
+    .relative(path.dirname(shadowFsPath), path.dirname(notebookFsPath))
+    .replace(/\\/g, "/");
 }
 
 export function shadowBaseName(relativePath: string): string {

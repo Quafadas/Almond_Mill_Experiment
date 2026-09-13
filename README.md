@@ -247,6 +247,33 @@ when to nest means reading the names a cell defines; a definition we can't name 
 collision, since opening a scope is always safe and missing one only costs the error we would have
 reported anyway.
 
+**Re-imports (nested blocks).** The same problem as redefinition, one level down. Almond replays an
+earlier cell's imports into the next cell's wrapper, so an import that provides a name an earlier
+import also provided simply masks it. Flattened into one scope the two are equal candidates instead,
+and Scala 3 reports an ambiguity on code the kernel compiled — a notebook importing both
+`io.circe.literal.*` and a plotting library's `{*, given}` gets *"Ambiguous extension methods"* on
+every `json"..."` in every later cell.
+
+So each top-level import opens a block that everything after it lives in, by *appending* `; {` to
+the import's last line:
+
+```scala
+import io.github.quafadas.plots.SetupVega.{*, given} ; {
+import io.circe.syntax.* ; {
+import io.circe.literal.* ; {
+/* --- cell 2 W2 */
+...
+}}}                                    // closed with the other scopes at end of file
+```
+
+The last import is innermost, so it wins, exactly as the kernel's replay does. Appending is what
+keeps this free of the mapping: no line is inserted and no column before a line's end moves, the
+same property the `resN_M` openers rest on. Two deliberate divergences: within a *single* cell the
+kernel would still report the ambiguity (imports and code share one scope there) whereas the shadow
+masks anyway — erring toward accepting code the kernel runs, never toward squiggling it — and two
+imports written on one line share a block, since separating them would mean inserting a line. An
+import whose line ends inside a string or comment is skipped, and the nesting is capped at 100.
+
 **Why the `-Wconf`.** A cell ending in a bare expression (`n + 1`, `df.show`) is idiomatic — in a
 notebook that expression *is* the cell's result. Bare statements we can't bind (below) would
 otherwise squiggle with *"A pure expression does nothing in statement position"*. The header
@@ -280,10 +307,25 @@ ran cells out of order, the numbers won't line up with what your kernel printed.
 **Magic imports.** None of Ammonite/Almond's `$`-imports are legal Scala, so every line using one is
 commented out in place (`// [shadow] ...`), preserving line numbering. `$ivy`/`$dep` (single,
 comma-separated, or braced) become `mvnDeps` entries and `$repo` becomes a `repositories` entry;
-`$file`, `$plugin`, `$scalac` and `$profile` have no shadow-file equivalent and are only
-neutralized. A coordinate using Almond's `_` version placeholder (`sh.almond::scala-kernel-api:_`)
+`$cp` becomes a `//> using resourceDir` (below); `$file`, `$plugin`, `$scalac` and `$profile` have
+no shadow-file equivalent and are only neutralized. A coordinate using Almond's `_` version placeholder (`sh.almond::scala-kernel-api:_`)
 is dropped rather than written to the header, where scala-cli couldn't resolve it and the failure would
 bury every real diagnostic.
+
+**`$cp` and the shadow's classpath.** `import $cp.^.resources` puts a directory on the kernel's
+classpath, named relative to the *notebook*. The shadow file gets the same directory through
+`//> using resourceDir`, which resolves relative to the *shadow file* - so the path is rewritten
+across that hop: for `analysis/sample.ipynb` shadowed into `notebook-shadow/`, `$cp.^.resources`
+becomes `//> using resourceDir ../resources`. `^` segments, backticked segments
+(``$cp.^.`test-resources` ``) and braced groups (`$cp.^.{resources, fixtures}`) are all read, and
+identical directories are declared once.
+
+*Limitation: directories only.* A `$cp` naming a **jar** is neutralized like any other magic import
+but contributes no directive. `resourceDir` is handed to the compiler as a directory, and pointing
+it at a jar fails the entire compile with "Could not find package scala from compiler core
+libraries" — every cell in the notebook loses its diagnostics, not just the line that asked for the
+jar. A directory that does not exist is ignored by scala-cli, so a stale `$cp` costs nothing; use
+`scalaNotebook.mvnDeps` or a `//> using jar` directive in the first cell for a local jar.
 
 **The prelude.** A notebook cell can write `Markdown("# Hello World")`, `publish.stdout(...)` or
 `repl.pprinter()` without importing anything, because the kernel injects a predef ahead of every
@@ -400,7 +442,8 @@ A `//>` directive is a valid Scala line comment, so a notebook cell could carry
 `//> using file ../my/module`: the kernel ignores it, and the extension could hoist it into the
 shadow header next to the `dep` directives, giving Metals local sources to type-check cells against
 without publishing anything. The extension does **not** do this today — `collectMagicImports`
-(transform.ts) recognizes `$ivy`/`$dep`/`$repo` only. Recorded here because the gotcha below
+(transform.ts) recognizes `$ivy`/`$dep`/`$repo` and `$cp` only, and `$cp` reaches only a directory
+of resources, not a module's sources. Recorded here because the gotcha below
 applies to any local-module scheme; it was written against Mill's `moduleDeps`
 ([issue #10](https://github.com/Quafadas/Almond_Mill_Experiment/issues/10)), which this branch no
 longer has a target for.
