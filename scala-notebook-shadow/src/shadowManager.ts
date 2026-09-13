@@ -332,18 +332,31 @@ export class ShadowManager implements vscode.Disposable {
       notebookDirFromShadow: relativeNotebookDir(shadowUri.fsPath, notebook.uri.fsPath),
     });
 
-    let existed = true;
+    // `mapping` describes `text` and nothing else, so `text` is what has to be on disk:
+    // Metals compiles the file, and a diagnostic it reports against some other revision
+    // would be relayed through spans that do not describe it. A shadow left behind by an
+    // earlier session can be exactly that - the notebook was edited elsewhere, a
+    // `scalaNotebook.*` setting changed, or this extension's own output did - and a header
+    // that gained or lost a line offsets every squiggle in the notebook, silently, until
+    // the first cell edit happens to regenerate it.
+    //
+    // Compared rather than written unconditionally, so reopening an unchanged notebook -
+    // the ordinary case - still costs no write and no compile.
+    let onDisk: string | undefined;
     try {
-      await vscode.workspace.fs.stat(shadowUri);
+      onDisk = Buffer.from(await vscode.workspace.fs.readFile(shadowUri)).toString("utf8");
     } catch {
-      existed = false;
+      onDisk = undefined;
     }
-    if (!existed) {
+    if (onDisk === undefined) {
       await vscode.workspace.fs.writeFile(shadowUri, Buffer.from(text, "utf8"));
       this.log.info(`Created ${shadowUri.toString()} (object ${baseName})`);
+    } else if (onDisk !== text) {
+      await vscode.workspace.fs.writeFile(shadowUri, Buffer.from(text, "utf8"));
+      this.log.info(`Rewrote ${relativePath}: the shadow on disk was out of step with the notebook.`);
     }
 
-    const doc = await vscode.workspace.openTextDocument(shadowUri);
+    await vscode.workspace.openTextDocument(shadowUri);
 
     const state: ShadowState = {
       notebook,
@@ -351,19 +364,13 @@ export class ShadowManager implements vscode.Disposable {
       relativePath,
       wrapperObjectName: baseName,
       mapping,
-      appliedText: existed ? undefined : text,
+      appliedText: text,
       closed: false,
       debounceHandle: undefined,
     };
     this.states.set(notebook.uri.toString(), state);
     this.shadowUriToNotebookUri.set(shadowUri.toString(), notebook.uri.toString());
     this.indexCells(state);
-
-    if (existed) {
-      // Reconcile with what's actually on disk so a no-op edit doesn't fire on first change.
-      state.appliedText = doc.getText();
-      state.mapping = mapping;
-    }
   }
 
   /** Debounced regeneration entry point, called on every notebook content change. */
